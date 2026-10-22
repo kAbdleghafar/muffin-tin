@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtpot"
+version = "0.0.1"
+description = "Muffin-tin / EAM-like potential for refractory bcc SQS alloys, fitted to DFT"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "ase"]
+
+[project.optional-dependencies]
+train = ["torch"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "scripts", "tests"]
+filterwarnings = ["ignore:Setting the shape on a NumPy array:DeprecationWarning:ase"]
+markers = ["data: needs the raw DFT samples in data/raw (or $MTPOT_RAW); skipped if absent"]

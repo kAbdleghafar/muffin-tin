@@ -1,0 +1,9 @@
+# raw DFT data is read-only and never committed (~13 GB of cubes)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*.extxyz
+data/processed/*.npz
+*.cube
+__pycache__/
+*.egg-info/
+.pytest_cache/
