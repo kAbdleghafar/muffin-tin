@@ -52,7 +52,8 @@ so predictions are comparable to the DFT labels.
 - **ASE's `espresso-out` reader fails on these files** (no `Program PWSCF` marker). Use the
   custom parser `scripts/tpw_to_dataset.py`.
 - Reference header uses `alat=  X a.u.`; each work's pw header uses `lattice parameter (alat)`.
-- Per work: `Applying the following strain` + 3 matrix lines, `Doing work n / 24`,
+- Per work: `Applying the following strain` + 3 matrix lines (`(  -0.00750,  0.00000,  0.00000  )`),
+  `Doing work n / 24`,
   `crystal axes`, `site n. atom positions (alat units)`.
 - Per ionic step: `!    total energy` (= free energy F, Ry), `smearing contrib. (-TS)`,
   `Forces acting on atoms` (take the first nat lines only; Ry/bohr),
@@ -94,7 +95,8 @@ Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
   `xfail` tests mark known gaps: numeric alloy ID, and `final` set on a work whose BFGS never
   converged (an interrupted run would feed an unrelaxed stress into the refit).
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
-  `data/raw/` or `$MTPOT_RAW`.
+  `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
+  reference rows × (I + ε) with fixed fractional coordinates); `140`, `150` not yet uploaded.
 
 ## Regression fixtures (from the three samples)
 
@@ -116,8 +118,10 @@ Turn these into pytest tests before refactoring the parser.
 ## Known data issues
 
 1. **`150` is incomplete in its output file**: works 1–22 came from restart files.
-   Their full data must come from the earlier interrupted run's output. Detect and report
-   this for every alloy; never silently drop it.
+   The earlier interrupted run's output is lost (the user does not know where it is), so
+   for `150` only works 23–24 give frames; thermo_pw's C_ij is still usable as a label.
+   Recovering works 1–22 would mean recomputing them. Detect and report restarted works
+   for every alloy; never silently drop them.
 2. **Mixed smearing schemes** across alloys: always correct to E0 and store the scheme
    as metadata; check for systematic C_ij differences between schemes.
 3. **Narrow configuration coverage**: within an alloy, energies span only 1–1.6 meV/atom and
@@ -187,7 +191,8 @@ Environment: Python ≥ 3.10, numpy, scipy, ase, torch, pytest
 ## Open questions for the user
 
 - How many of the 252 alloys used each smearing scheme?
-- Where is the full output of the interrupted `150` run (and any other restarted runs)?
+- ~~Where is the full output of the interrupted `150` run?~~ Unknown/lost (see Known data
+  issue 1). Phase 0 will list any other restarted runs; decide then whether to recompute.
 - Are the vc-relax outputs (ideal → relaxed SQS) available as extra training data?
 - Target accuracy for C_ij (provisional: MAE ≤ 5–10 GPa vs DFT)?
 - Is LAMMPS export required, or is an ASE/PyTorch calculator enough?
