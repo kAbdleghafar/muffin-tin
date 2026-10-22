@@ -189,7 +189,7 @@ class SyntheticRun:
         for work in range(1, N_WORKS + 1):
             eps = thermo_pw_strain(work)
             out += ["     Applying the following strain"]
-            out += ["     {:12.7f}{:12.7f}{:12.7f}".format(*eps[r]) for r in range(3)]
+            out += ["     ({:13.5f},{:13.5f},{:13.5f}  )".format(*eps[r]) for r in range(3)]
             out += ["", f"     Doing work {work:6d} / {N_WORKS:6d}", ""]
             if work not in self.works:
                 out += ["     (read from restart file)", ""]
