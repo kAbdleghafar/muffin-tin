@@ -169,9 +169,19 @@ full-batch L-BFGS). `src/mtpot/splits.py`: shared alloy splits (`binaries`, `tes
 `train_eam.py` (→ `models/<tag>.pt/.log/.json`; `--init` warm start). Torch: CPU wheel from
 `https://download.pytorch.org/whl/cpu` (the PyPI wheel pulls GBs of CUDA libraries).
 
+Relax trajectories: `data.build_relax` → `data/processed/train_relax/<id>.npz` (202 runs,
+~11 frames each: log-spaced BFGS steps incl. the ideal start and last step, plus the final
+SCF; 7 MB, ~20 s). Energies enter only as differences within `energy_group` (BFGS frames;
+the final SCF is its own group), so mixed cut-offs/smearing do not matter. `train_eam.py
+--relax` adds the relax runs of the *training* alloys; those of validation alloys are only
+reported (`val_relax_*`): their relaxed structures are the elastic reference cells, so
+training on them would leak. Loss weights `rE/rF/rS` (default rS = 0.25, i.e. σ 0.2 GPa:
+relax stresses carry setting-dependent offsets of ~0.2–0.3 GPa).
+
 ```bash
 python scripts/build_dataset.py data/raw -j 4
-python scripts/train_eam.py --train rest --val test --optimizer lbfgs --epochs 300 \
+python scripts/build_dataset.py data/raw --relax -j 4
+python scripts/train_eam.py --train rest --val test --relax --optimizer lbfgs --epochs 300 \
     --eval-every 50 --tag eam_v1
 ```
 

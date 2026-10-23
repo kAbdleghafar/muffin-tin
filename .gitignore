@@ -12,3 +12,4 @@ data/processed/density/
 data/processed/train/
 models/*
 !models/README.md
+data/processed/train_relax/

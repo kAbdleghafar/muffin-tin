@@ -14,10 +14,14 @@ VOIGT_OF_BLOCK = [0, 1, 2, 5, 4, 3]       # works 1-4 e1, 5-8 e2, 9-12 e3, 13-16
 
 
 class AlloyBatch:
-    """One alloy's frames, collated once, with labels as torch tensors."""
+    """One alloy's frames, collated once, with labels as torch tensors. Elastic sets carry
+    composition-referenced energies and C_ij labels; relax sets (`energy_group` present) are
+    fitted on energy differences within each group only (their cut-offs differ)."""
 
     def __init__(self, d, mu):
         self.alloy = str(d["alloy"])
+        self.relax = "energy_group" in d
+        self.groups = torch.as_tensor(d["energy_group"].astype(np.int64)) if self.relax else None
         self.batch = collate(frame_graphs(d))
         nat = len(d["species"])
         t = lambda a: torch.as_tensor(np.asarray(a, dtype=np.float64))
@@ -28,9 +32,11 @@ class AlloyBatch:
         self.w = t(d["weight"])
         self.w_atom = self.w.repeat_interleave(nat)
         # C_ij from stresses at the 24 final frames, if every relaxation ended
+        self.cij = None
+        if self.relax:
+            return
         final = np.where(d["final"])[0]
         works = d["work"][final]
-        self.cij = None
         if len(final) == 24 and sorted(works) == list(range(1, 25)):
             order = final[np.argsort(works)]
             e = np.array([d["strain"][order[w], VOIGT_OF_BLOCK[w // 4]] for w in range(24)])
@@ -68,10 +74,21 @@ def init_model(model):
     return model
 
 
+def group_centred(x, groups, w):
+    """x minus its w-weighted mean within each group."""
+    n = int(groups.max()) + 1
+    m = torch.zeros(n, dtype=x.dtype).index_add(0, groups, w * x) / \
+        torch.zeros(n, dtype=x.dtype).index_add(0, groups, w)
+    return x - m[groups]
+
+
 def evaluate(model, ab, create_graph=False, cij=True):
     out = model(ab.batch, create_graph=create_graph)
     e = out["energy"] / ab.nat
-    res = dict(dE=e - ab.e_target, dF=out["forces"] - ab.f_target,
+    dE = e - ab.e_target
+    if ab.relax:
+        dE = group_centred(dE, ab.groups, ab.w)
+    res = dict(dE=dE, dF=out["forces"] - ab.f_target,
                dS=out["stress"] * EV_A3_GPA - ab.s_target)
     if cij and ab.cij is not None:
         C = cij_from_stress(out["stress"] * EV_A3_GPA, ab.cij)
@@ -81,29 +98,39 @@ def evaluate(model, ab, create_graph=False, cij=True):
 
 
 def loss_of(res, ab, w):
-    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa."""
-    L = w["E"] * (ab.w * (res["dE"] * 1e3) ** 2).sum() / ab.w.sum()
-    L = L + w["F"] * (ab.w_atom[:, None] * (res["dF"] / 0.05) ** 2).sum() / (3 * ab.w_atom.sum())
-    L = L + w["S"] * (ab.w[:, None] * (res["dS"] / 0.1) ** 2).sum() / (6 * ab.w.sum())
+    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa.
+    Relax sets use the weights rE, rF, rS (default: same as E, F, S)."""
+    p = "r" if ab.relax else ""
+    wE, wF, wS = (w.get(p + k, w[k]) for k in ("E", "F", "S"))
+    L = wE * (ab.w * (res["dE"] * 1e3) ** 2).sum() / ab.w.sum()
+    L = L + wF * (ab.w_atom[:, None] * (res["dF"] / 0.05) ** 2).sum() / (3 * ab.w_atom.sum())
+    L = L + wS * (ab.w[:, None] * (res["dS"] / 0.1) ** 2).sum() / (6 * ab.w.sum())
     if "dC" in res and w.get("C", 0) > 0:
         dC = 0.5 * (res["dC"] + res["dC"].T)
         L = L + w["C"] * ((dC / 5.0) ** 2).mean()
     return L
 
 
+def report(model, sets):
+    """summarize() for several named sets, flattened as '<name>_<metric>'."""
+    return {f"{name}_{k}": v for name, alloys in sets.items() if alloys
+            for k, v in summarize(model, alloys).items()}
+
+
 def summarize(model, alloys):
-    """RMSEs over alloys (work-weighted) and C11/C12/C44 errors from stress slopes."""
+    """RMSEs over alloys (frame-weighted; relax energies within-group centred) and
+    C11/C12/C44 errors from stress slopes."""
     se_e = se_f = se_s = 0.0
     n_e = n_f = n_s = 0.0
     cub = []
     with torch.enable_grad():
         for ab in alloys:
-            res = evaluate(model, ab)
+            res = {k: v.detach() for k, v in evaluate(model, ab).items()}
             se_e += float((ab.w * res["dE"] ** 2).sum()); n_e += float(ab.w.sum())
             se_f += float((ab.w_atom[:, None] * res["dF"] ** 2).sum()); n_f += 3 * float(ab.w_atom.sum())
             se_s += float((ab.w[:, None] * res["dS"] ** 2).sum()); n_s += 6 * float(ab.w.sum())
             if "C" in res:
-                cub.append((cubic(res["C"].detach()).numpy(), cubic(ab.cij[2]).numpy()))
+                cub.append((cubic(res["C"]).numpy(), cubic(ab.cij[2]).numpy()))
     out = dict(E_meV_atom=1e3 * np.sqrt(se_e / n_e), F_eV_A=np.sqrt(se_f / n_f),
                S_GPa=np.sqrt(se_s / n_s))
     if cub:
@@ -137,8 +164,7 @@ def fit(model, train, val, weights, epochs=50, lr=1e-2, batch_alloys=4, reg=1e-4
         row = dict(epoch=ep, loss=tot / int(np.ceil(len(order) / batch_alloys)),
                    seconds=time.time() - t0)
         if ep % eval_every == 0 or ep == epochs:
-            row.update({f"train_{k}": v for k, v in summarize(model, train).items()})
-            row.update({f"val_{k}": v for k, v in summarize(model, val).items()})
+            row.update(report(model, val if isinstance(val, dict) else {"train": train, "val": val}))
         hist.append(row)
         if log:
             print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()}),
@@ -172,8 +198,7 @@ def fit_lbfgs(model, train, val, weights, iters=100, reg=1e-4, log=None, eval_ev
         t0 = time.time()
         loss = float(opt.step(closure))
         row = dict(iteration=it, evaluations=n_eval[0], loss=loss, seconds=time.time() - t0)
-        row.update({f"train_{k}": v for k, v in summarize(model, train).items()})
-        row.update({f"val_{k}": v for k, v in summarize(model, val).items()})
+        row.update(report(model, val if isinstance(val, dict) else {"train": train, "val": val}))
         hist.append(row)
         if log:
             print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()}),
