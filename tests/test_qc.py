@@ -89,7 +89,15 @@ def test_qc_resumes_from_cache(raw, tmp_path):
     assert rows[0]["flags"].startswith("parse error (FileNotFoundError")
 
 
+def test_qc_parallel_matches_serial(raw, tmp_path):
+    serial = qc.main([str(raw), "-o", str(tmp_path / "a" / "qc.csv")])
+    parallel = qc.main([str(raw), "-o", str(tmp_path / "b" / "qc.csv"), "-j", "2"])
+    assert serial == parallel
+
+
 def test_flags_unconverged_and_settings():
     row = {"xc": "PBE", "ecutwfc_Ry": 55.0, "ecutrho_Ry": 550.0, "nelec": 50.0, "zval_sum": 50.0,
-           "works_total": 24, "works_unconverged": "24", "C11_GPa": 197.0, "noncubic_frac": 0.03}
-    assert qc.flags(row) == ["settings (PBE, 55.0/550.0 Ry)", "unconverged works (24)"]
+           "works_total": 24, "works_unfinished": "24", "works_maxsteps": "5,21",
+           "C11_GPa": 197.0, "noncubic_frac": 0.03}
+    assert qc.flags(row) == ["settings (PBE, 55.0/550.0 Ry)", "unfinished works (24)",
+                             "BFGS step limit (5,21)"]

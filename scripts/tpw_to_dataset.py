@@ -63,8 +63,8 @@ def parse_thermo_pw(path, alloy_id=None):
         lines = fh.read().splitlines()
     alloy_id = alloy_id or alloy_id_from_path(path)
     info = {"alloy": alloy_id, "settings": _settings("\n".join(lines[:3000])),
-            "works_total": None, "works_computed": set(), "works_converged": set(),
-            "C_tpw_kbar": None}
+            "works_total": None, "works_computed": set(), "works_ended": set(),
+            "works_converged": set(), "works_maxsteps": set(), "C_tpw_kbar": None}
 
     frames, alat, axes, symbols, cart = [], None, np.zeros((3, 3)), [], None
     strain, work, step, cur = None, None, 0, None
@@ -136,15 +136,21 @@ def parse_thermo_pw(path, alloy_id=None):
             i += 4; continue
         elif "bfgs converged" in L and work is not None:
             info["works_converged"].add(work)
+        elif "maximum number of steps has been reached" in L and work is not None:
+            info["works_maxsteps"].add(work)
+        elif "End of BFGS Geometry Optimization" in L and work is not None:
+            info["works_ended"].add(work)
         elif "Elastic constants C_ij (kbar)" in L:
             info["C_tpw_kbar"] = np.array([[float(x) for x in lines[i + 2 + k].split()[1:7]]
                                            for k in range(6)])
         i += 1
 
-    # mark the last ionic step of each strained geometry, if its relaxation converged
+    # final = last ionic step of each strained geometry whose BFGS run ended, converged or
+    # stopped at nstep (thermo_pw uses that stress too); a run cut off mid-relaxation has none
     for a, b in zip(frames, frames[1:] + [None]):
         last = b is None or b["meta"]["work"] != a["meta"]["work"]
-        a["meta"]["final"] = last and a["meta"]["work"] in info["works_converged"]
+        a["meta"]["final"] = last and a["meta"]["work"] in info["works_ended"]
+        a["meta"]["converged"] = a["meta"]["work"] in info["works_converged"]
     info["reference"] = ref
     return frames, info
 
@@ -156,7 +162,8 @@ def to_atoms(fr, smearing=None):
     a.calc = calc
     m = fr["meta"]
     a.info.update(alloy=m["alloy"], work=m["work"], ionic_step=m["ionic_step"],
-                  final=m["final"], strain_voigt=voigt_strain(m["strain"]),
+                  final=m["final"], relax_converged=m["converged"],
+                  strain_voigt=voigt_strain(m["strain"]),
                   minus_TS=fr.get("mTS", 0.0), smearing=smearing or "unknown")
     return a
 
@@ -228,10 +235,13 @@ def main():
         if missing:
             print(f"   WARNING: works {missing} not in this file (read from restart); "
                   f"their energies/forces/stresses are missing")
-        unconverged = sorted(info["works_computed"] - info["works_converged"])
-        if unconverged:
-            print(f"   WARNING: works {unconverged} have no converged BFGS relaxation; "
+        unfinished = sorted(info["works_computed"] - info["works_ended"])
+        if unfinished:
+            print(f"   WARNING: works {unfinished} have no end of BFGS (output cut off?); "
                   f"none of their frames is marked final")
+        if info["works_maxsteps"]:
+            print(f"   note: works {sorted(info['works_maxsteps'])} stopped at the BFGS step "
+                  f"limit before converging; their last frame is final, as thermo_pw used it")
         if len(frames_ok) < len(frames):
             print(f"   WARNING: {len(frames) - len(frames_ok)} frames dropped "
                   f"(no forces or stress printed)")
