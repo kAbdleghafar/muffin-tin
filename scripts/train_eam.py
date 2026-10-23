@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from mtpot.potential.data import reference_energies
 from mtpot.potential.eam import EAM
-from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, save, summarize
+from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, report, save
 from mtpot.splits import resolve
 
 
@@ -30,7 +30,10 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--batch-alloys", type=int, default=4)
     ap.add_argument("--reg", type=float, default=1e-4)
-    ap.add_argument("--w", default="E=1,F=1,S=1,C=1", help="loss weights")
+    ap.add_argument("--w", default="E=1,F=1,S=1,C=1,rE=1,rF=1,rS=0.25",
+                    help="loss weights (rE/rF/rS: relax sets)")
+    ap.add_argument("--relax", action="store_true",
+                    help="add vc-relax trajectories of the training alloys (val: report only)")
     ap.add_argument("--max-train", type=int, help="random subset of training alloys")
     ap.add_argument("--rc", type=float, default=6.0)
     ap.add_argument("--n-pair", type=int, default=21)
@@ -44,7 +47,10 @@ def main(argv=None):
     torch.set_num_threads(args.threads)
 
     data_dir = ROOT / "data" / "processed" / "train"
+    relax_dir = ROOT / "data" / "processed" / "train_relax"
     read = lambda ids: [dict(np.load(data_dir / f"{a}.npz")) for a in ids]
+    read_relax = lambda ids: [dict(np.load(relax_dir / f"{a}.npz")) for a in ids
+                              if (relax_dir / f"{a}.npz").exists()]
     train_ids, val_ids = resolve(args.train), resolve(args.val)
     if args.max_train and len(train_ids) > args.max_train:
         rng = np.random.default_rng(0)
@@ -53,11 +59,15 @@ def main(argv=None):
     t0 = time.time()
     raw_train, raw_val = read(train_ids), read(val_ids)
     mu = reference_energies(raw_train)
-    train = [AlloyBatch(d, mu) for d in raw_train]
-    val = [AlloyBatch(d, mu) for d in raw_val]
+    sets = {"train": [AlloyBatch(d, mu) for d in raw_train],
+            "val": [AlloyBatch(d, mu) for d in raw_val]}
+    if args.relax:
+        sets["train_relax"] = [AlloyBatch(d, mu) for d in read_relax(train_ids)]
+        sets["val_relax"] = [AlloyBatch(d, mu) for d in read_relax(val_ids)]
+    train = sets["train"] + sets.get("train_relax", [])
     del raw_train, raw_val
-    print(f"loaded {len(train)} train / {len(val)} val alloys in {time.time() - t0:.0f} s; "
-          f"mu (eV) = {np.round(mu, 3).tolist()}", flush=True)
+    print(f"loaded {', '.join(f'{len(v)} {k}' for k, v in sets.items())} in "
+          f"{time.time() - t0:.0f} s; mu (eV) = {np.round(mu, 3).tolist()}", flush=True)
 
     mcfg = dict(rc=args.rc, n_pair=args.n_pair, n_dens=args.n_dens, n_embed=args.n_embed)
     if args.init:
@@ -73,16 +83,16 @@ def main(argv=None):
     out.mkdir(exist_ok=True)
     with open(out / f"{args.tag}.log", "w") as log:
         if args.optimizer == "lbfgs":
-            hist = fit_lbfgs(model, train, val, weights, iters=args.epochs, reg=args.reg,
+            hist = fit_lbfgs(model, train, sets, weights, iters=args.epochs, reg=args.reg,
                              log=log, eval_every=args.eval_every)
         else:
-            hist = fit(model, train, val, weights, epochs=args.epochs, lr=args.lr,
+            hist = fit(model, train, sets, weights, epochs=args.epochs, lr=args.lr,
                        batch_alloys=args.batch_alloys, reg=args.reg, log=log,
                        eval_every=args.eval_every)
     config = dict(model=mcfg, args=vars(args), train=train_ids, val=val_ids)
     save(model, out / f"{args.tag}.pt", mu, config)
-    final = {"train": summarize(model, train), "val": summarize(model, val),
-             "epochs": args.epochs, "seconds": sum(h["seconds"] for h in hist)}
+    final = dict(report(model, sets), epochs=args.epochs,
+                 seconds=sum(h["seconds"] for h in hist))
     (out / f"{args.tag}.json").write_text(json.dumps(final, indent=1, default=float))
     print(json.dumps(final, indent=1, default=float))
 

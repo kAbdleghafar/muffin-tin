@@ -54,3 +54,13 @@ def test_training_step_reduces_loss(built):
     assert losses[-1] < losses[0]
     s = summarize(m, [ab])
     assert set(s) >= {"E_meV_atom", "F_eV_A", "S_GPa", "C11_MAE", "C44_MAE"}
+
+
+def test_relax_sets_use_energy_differences_within_groups():
+    from mtpot.potential.train import group_centred
+    g = torch.tensor([0, 0, 0, 1])
+    w = torch.tensor([1.0, 1.0, 2.0, 1.0], dtype=torch.float64)
+    x = torch.tensor([1.0, 2.0, 3.0, 7.0], dtype=torch.float64)
+    y = group_centred(x, g, w)
+    assert torch.allclose(y, torch.tensor([-1.25, -0.25, 0.75, 0.0], dtype=torch.float64))
+    assert torch.allclose(group_centred(x + 5.0, g, w), y)              # shift-invariant

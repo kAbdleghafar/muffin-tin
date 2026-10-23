@@ -84,3 +84,39 @@ def reference_energies(alloys):
     mu = np.zeros(len(SPECIES))
     mu[used] = np.linalg.lstsq(A[:, used], y, rcond=None)[0]
     return mu
+
+
+def build_relax(path, rc=6.0, max_frames=12):
+    """Arrays for one pw.x vc-relax run: up to max_frames BFGS frames, log-spaced along the
+    trajectory (always the ideal start and the last BFGS step), plus the final SCF.
+    Cut-offs and smearing differ between runs, so only energy differences within a run are
+    meaningful: `energy_group` 0 = BFGS frames (one basis set); the final SCF (new G-vectors)
+    is its own group and contributes forces and stress only. Returns None without frames."""
+    from mtpot.io.pwscf import parse_pw_relax
+    frames, info = parse_pw_relax(path)
+    smearing = (info["settings"]["smearing"] or "").split()[0]
+    ok = [f for f in frames if f["F"] is not None and f["S"] is not None]
+    bfgs = [f for f in ok if f["kind"] == "bfgs"]
+    if not bfgs:
+        return None
+    idx = np.unique(np.round(np.geomspace(1, len(bfgs), max_frames - 1)).astype(int) - 1)
+    keep = [bfgs[i] for i in idx] + [f for f in ok if f["kind"] == "final_scf"][:1]
+    group = np.array([0 if f["kind"] == "bfgs" else 1 for f in keep], dtype=np.int8)
+    species = np.array([SPECIES.index(s) for s in keep[0]["symbols"]], dtype=np.int8)
+    nl_i, nl_j, nl_S, ptr = [], [], [], [0]
+    for f in keep:
+        at = Atoms(f["symbols"], positions=f["pos"], cell=f["cell"], pbc=True)
+        i, j, S = neighbor_list("ijS", at, rc)
+        nl_i.append(i.astype(np.int16)); nl_j.append(j.astype(np.int16)); nl_S.append(S.astype(np.int8))
+        ptr.append(ptr[-1] + len(i))
+    return dict(
+        alloy=info["alloy"], smearing=smearing, species=species, source="relax",
+        ecut=f"{info['settings']['ecutwfc_Ry']}/{info['settings']['ecutrho_Ry']}",
+        positions=np.array([f["pos"] for f in keep]), cells=np.array([f["cell"] for f in keep]),
+        energy=np.array([e0_energy(f, smearing) for f in keep]),
+        forces=np.array([f["F"] for f in keep]),
+        stress=np.array([voigt_stress(f["S"]) for f in keep]),
+        step=np.array([f["step"] for f in keep], dtype=np.int16), energy_group=group,
+        weight=np.full(len(keep), 1.0 / len(keep)),
+        nl_i=np.concatenate(nl_i), nl_j=np.concatenate(nl_j), nl_S=np.concatenate(nl_S),
+        nl_ptr=np.array(ptr, dtype=np.int64), rc=rc)
