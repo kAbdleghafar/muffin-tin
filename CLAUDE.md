@@ -180,7 +180,7 @@ Turn these into pytest tests before refactoring the parser.
 8. **Large non-cubic part (> 8%) in 17 alloys, all Ti-rich (Ti ≥ 31%)**, up to 20% (`88`
    Ta4Ti28): physical (soft bcc Ti), raises the C_ij error floor for those alloys.
 
-## Phase 0 results (thermo_pw outputs, `data/processed/qc.csv`)
+## Phase 0 results (complete; `data/processed/qc.csv`)
 
 - 255 alloys, no parse errors; 52,797 frames (51,233 in the 241 complete alloys).
 - Settings identical everywhere (PBEsol, 55/550 Ry); nelec = ΣZval for all.
@@ -189,12 +189,17 @@ Turn these into pytest tests before refactoring the parser.
 - Range: C11 134–463, C12 86–178, C44 19–102 GPa (medians 191 / 117 / 38).
 - **Cauchy pressure C12 − C44 > 0 for all 255** and C′ ≥ 18 GPa: pure EAM is not ruled out by
   the Cauchy-pressure sign; angular terms must be justified by Phase 1 or by fit quality.
-- Cube pass (rho electron count, ELF range, cube vs reference structure) not yet run on the
-  full set (samples `01`, `140`, `150` pass).
+- Cubes (all 255, rho and ELF): rho integrates to ΣZval within ±0.006 e and is positive
+  everywhere (min 0.018 e/bohr³); ELF within 0.003–1.0; every cube matches its thermo_pw
+  reference cell and positions within 6.3e-5 Å; rho and ELF share the grid in every alloy
+  (16 distinct grids, 96×96×192 in 193 alloys). No cube flags.
+- Flags (91 alloys): BFGS step limit 56, residual stress 18, non-cubic 17, restart works 14 —
+  all described under "Known data issues"; nothing else inconsistent.
+- Full sweep: ~75 s for thermo_pw outputs with `-j 4`; ~14 min with cubes from a cold disk.
 
 ## Roadmap
 
-**Phase 0 – ingestion & QC.** Parse all 252 alloys; one QC table: settings, smearing,
+**Phase 0 – ingestion & QC (done, see "Phase 0 results").** Parse all 255 alloys; one QC table: settings, smearing,
 works present, frames, residual stress, refit-vs-thermo_pw difference, rho electron count.
 Flag anything inconsistent.
 
@@ -242,7 +247,7 @@ Environment: Python ≥ 3.10, numpy, scipy, ase, torch, pytest
 - Do not use `ase.io.read(..., format="espresso-out")` on thermo_pw outputs.
 - Do not fit density inside the core mask, and do not mix F from different smearing schemes.
 - Keep the unit and sign conventions above; add a test whenever a conversion is touched.
-- Ask the user before launching anything long (full 252-alloy cube processing, training runs).
+- Ask the user before launching anything long (full 255-alloy cube processing, training runs).
 
 ## Open questions for the user
 
