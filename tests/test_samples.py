@@ -7,16 +7,15 @@ from functools import lru_cache
 
 import numpy as np
 import pytest
-from ase.io.cube import read_cube_data
-from ase.units import Bohr
-
+import qc
 import tpw_to_dataset as tpw
-from conftest import raw_file
+from conftest import RAW, raw_file
+from mtpot.dft import ZVAL
 from mtpot.elastic.protocol import N_WORKS, thermo_pw_strain
+from mtpot.io.cube import integrate, read_cube, structure_deviation
 
 pytestmark = pytest.mark.data
 
-ZVAL = {"Ti": 12, "Zr": 12, "Nb": 13, "Mo": 14, "Hf": 12, "Ta": 27}
 SAMPLES = {
     "01": dict(formula="Mo8Ti24", natoms=32, frames=278, works=set(range(1, 25)),
                smearing="marzari-vanderbilt", degauss=0.007, cubic=(197.0, 113.1, 30.1),
@@ -48,8 +47,7 @@ def usable(frames):
 
 @lru_cache(maxsize=None)
 def _cube(path):
-    data, atoms = read_cube_data(path)
-    return atoms, data
+    return read_cube(path)
 
 
 def cube(kind, aid):
@@ -79,6 +77,8 @@ def test_frames_and_works_present(aid):
     assert len(usable(frames)) == exp["frames"]
     assert info["works_total"] == N_WORKS
     assert info["works_computed"] == exp["works"]       # 150: works 1-22 read from restart
+    assert info["works_converged"] == exp["works"]
+    assert info["alloy"] == aid
     for w in exp["works"]:
         flags = [f["meta"]["final"] for f in frames if f["meta"]["work"] == w]
         assert flags.count(True) == 1 and flags[-1], w
@@ -150,18 +150,10 @@ def test_narrow_configuration_coverage(aid):
 
 
 # --------------------------------------------------------------------------- cubes
-def _same_structure(a, ref, tol=2e-4):
-    assert list(a.numbers) == list(ref.numbers)
-    assert np.allclose(a.cell[:], ref.cell[:], atol=tol)
-    d = (a.positions - ref.positions) @ np.linalg.inv(ref.cell[:])
-    assert np.abs((d - np.round(d)) @ ref.cell[:]).max() < tol
-
-
 @ids
 def test_rho_integrates_to_valence_count(aid):
     atoms, rho = cube("rho", aid)
-    nelec = rho.mean() * atoms.get_volume() / Bohr**3    # e/bohr^3 on a periodic grid
-    assert nelec == pytest.approx(SAMPLES[aid]["nelec"], abs=0.05)
+    assert integrate(atoms, rho) == pytest.approx(SAMPLES[aid]["nelec"], abs=0.05)
 
 
 @ids
@@ -169,7 +161,21 @@ def test_cubes_match_reference_structure(aid):
     ref = parsed(aid)[1]["reference"]
     atoms_rho, rho = cube("rho", aid)
     atoms_elf, elf = cube("elf", aid)
-    _same_structure(atoms_rho, ref)
-    _same_structure(atoms_elf, ref)
+    assert structure_deviation(atoms_rho, ref) < 2e-4
+    assert structure_deviation(atoms_elf, ref) < 2e-4
     assert elf.shape == rho.shape
     assert elf.min() >= -1e-6 and elf.max() <= 1 + 1e-6
+
+
+# --------------------------------------------------------------------------- Phase 0 QC
+@ids
+def test_qc_row(aid):
+    """QC reproduces the fixtures; the only expected flag is 150's restart works."""
+    raw_file("elast", aid, "out")
+    raw_file("rho", aid, "cube")
+    row = qc.qc_alloy(RAW, aid)
+    c11, c12, c44 = SAMPLES[aid]["cubic"]
+    assert (row["C11_GPa"], row["C12_GPa"], row["C44_GPa"]) == pytest.approx((c11, c12, c44), abs=0.051)
+    assert row["frames"] == SAMPLES[aid]["frames"]
+    expected = ["restart works (1-22)"] if aid == "150" else []
+    assert qc.flags(row) == expected

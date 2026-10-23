@@ -91,7 +91,7 @@ def test_frames_works_and_final_flags(tmp_path, run):
     frames, info = parse(tmp_path, run)
     assert len(frames) == N_WORKS * run.n_steps
     assert info["works_total"] == N_WORKS
-    assert info["works_computed"] == set(range(1, N_WORKS + 1))
+    assert info["works_computed"] == info["works_converged"] == set(range(1, N_WORKS + 1))
     for w in range(1, N_WORKS + 1):
         fw = [f for f in frames if f["meta"]["work"] == w]
         assert [f["meta"]["ionic_step"] for f in fw] == list(range(1, run.n_steps + 1))
@@ -170,7 +170,7 @@ def test_cli_extxyz_roundtrip(tmp_path, monkeypatch, run):
                            atol=STRESS_PRINT_TOL_KBAR)          # Voigt xx yy zz yz xz xy
         assert np.allclose(a.cell[:], run.cell(w), atol=1e-6)
 
-    row = rows["elast_07"]
+    row = rows["07"]
     c11, c12, c44, dev, _ = tpw.cubic_projection(run.C)
     assert (float(row["C11_GPa"]), float(row["C12_GPa"]), float(row["C44_GPa"])) == \
         pytest.approx((round(c11 / 10, 1), round(c12 / 10, 1), round(c44 / 10, 1)))
@@ -185,22 +185,20 @@ def test_cli_reports_restart_works(tmp_path, monkeypatch, capsys):
     atoms, rows = run_cli(tmp_path, monkeypatch, full, part)
     out = capsys.readouterr().out
     assert f"WARNING: works {list(range(1, 23))} not in this file" in out
-    assert rows["elast_150"]["works_computed"] == "2"
-    assert rows["elast_150"]["max_refit_diff_GPa"] == ""       # no refit on incomplete data
-    assert rows["elast_01"]["max_refit_diff_GPa"] != ""
+    assert rows["150"]["works_computed"] == "2"
+    assert rows["150"]["max_refit_diff_GPa"] == ""             # no refit on incomplete data
+    assert rows["01"]["max_refit_diff_GPa"] != ""
     assert len(atoms) == (N_WORKS + 2) * 2
 
 
 # --------------------------------------------------------------------------- known gaps
-@pytest.mark.xfail(strict=True, reason="CLAUDE.md convention: alloy id = numeric suffix; "
-                                       "parser still stores 'elast_07'")
 def test_alloy_id_is_numeric(tmp_path):
     frames, info = parse(tmp_path, make_run())
     assert info["alloy"] == "07" and frames[0]["meta"]["alloy"] == "07"
+    assert tpw.alloy_id_from_path("data/raw/elast_150.out") == "150"
+    assert tpw.alloy_id_from_path("rho_01.cube") == "01"
 
 
-@pytest.mark.xfail(strict=True, reason="final = last frame of a work, even if BFGS never "
-                                       "converged (interrupted run): refit would use it")
 def test_unconverged_work_is_not_final(tmp_path):
     lines = make_run().lines()
     last_energy = max(i for i, L in enumerate(lines) if L.startswith("!"))
@@ -210,3 +208,6 @@ def test_unconverged_work_is_not_final(tmp_path):
     last = [f for f in frames if f["meta"]["work"] == 24]
     assert len(last) == 1 and info["C_tpw_kbar"] is None
     assert not last[0]["meta"]["final"]
+    assert info["works_converged"] == set(range(1, N_WORKS))
+    _, s0 = tpw.refit_cij(frames)              # work 24 drops out; 3 points remain for e4
+    assert np.allclose(s0, DEFAULT_S0_KBAR, atol=0.01)
