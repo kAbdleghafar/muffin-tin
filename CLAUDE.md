@@ -137,6 +137,23 @@ python scripts/density_phase1.py angular --ids binaries test --tag binaries
 python scripts/density_phase1.py report --ids binaries test --tag binaries
 ```
 
+`src/mtpot/potential/` (Phase 2): `splines` (torch cubic B-splines; cutoff, linear
+continuation, monotone option), `eam` (multi-species EAM, batched; forces and ASE-sign stress by
+autograd through positions and a strain tensor; `frame_graph`, `collate`), `export`
+(`write_setfl`, LAMMPS eam/alloy; matches ASE's EAM calculator), `data` (per-alloy training sets:
+first + final ionic step per work, E0, neighbour lists, reference energies μ_Z), `train`
+(losses on E/atom, F, S and C_ij from stress slopes at the 24 final frames; Adam and
+full-batch L-BFGS). `src/mtpot/splits.py`: shared alloy splits (`binaries`, `test`, `rest`,
+`all`). Scripts: `build_dataset.py` (→ `data/processed/train/<id>.npz`, ~6 min, 21 MB),
+`train_eam.py` (→ `models/<tag>.pt/.log/.json`; `--init` warm start). Torch: CPU wheel from
+`https://download.pytorch.org/whl/cpu` (the PyPI wheel pulls GBs of CUDA libraries).
+
+```bash
+python scripts/build_dataset.py data/raw -j 4
+python scripts/train_eam.py --train rest --val test --optimizer lbfgs --epochs 300 \
+    --eval-every 50 --tag eam_v1
+```
+
 Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_parser_synthetic.py`: parser units, signs, final flags, C_ij refit and CLI round trip
   on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`), including a
@@ -144,6 +161,10 @@ Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_qc.py`: QC sweep, flags and cache on synthetic alloys and cubes.
 - `tests/test_density.py`: neighbour pairs vs brute force, basis cutoff, recovery of known
   f_Z from synthetic triclinic superpositions (incl. monotone), harmonic analysis.
+- `tests/test_eam.py`: autograd forces/stress vs finite differences, batching, monotone
+  splines, setfl export vs ASE's EAM calculator.
+- `tests/test_potential_data.py`: training-set builder and C_ij-from-stress on synthetic
+  thermo_pw outputs (caught a swapped e4/e6 column).
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
   reference rows × (I + ε) with fixed fractional coordinates), and so do `140` and `150`.
@@ -231,6 +252,24 @@ Turn these into pytest tests before refactoring the parser.
 - For Phase 2: learn f_Z from energies/forces/stresses (rho only as a soft prior for
   r < 2.3 Å or as per-atom shell-density targets); EAM baseline plus one angular channel
   as an ablation.
+
+## Phase 2 status (EAM fits so far; nothing long has been run yet)
+
+- Data checks: DFT forces are consistent with energy changes between ionic steps
+  (corr 1.000); C_ij from stress slopes at final frames = thermo_pw within 0.008 GPa.
+  DFT forces are tiny (RMS 0.014 eV/Å, ionic steps move atoms 0.001–0.003 Å): the force
+  information is "these SQS displacements are in equilibrium".
+- One epoch over 232 alloys: 16 s (Adam batch) / one full-batch L-BFGS evaluation: ~16 s.
+- Adam (lr 1e-2) is a poor fit for this ~640-parameter smooth problem; L-BFGS works better.
+- Single alloy (`01`, 300 L-BFGS iterations): E 0.4 meV/atom, S 0.08 GPa, C_ij within
+  2–6 GPa, but F 0.11 eV/Å — forces are the hardest target even for one alloy.
+- 23 binaries (300 it.): train E 1.0 meV/atom, F 0.24 eV/Å, S 0.32 GPa, C11/C12/C44 MAE
+  19/24/22 GPa; no transfer to multi-element alloys (E ~1 eV/atom off): binaries train only
+  6 of the 15 unlike pair functions.
+- 60 random alloys (100 it.): held-out C11/C12/C44 MAE 115/68/31 GPa, F 0.47 eV/Å — far
+  from converged.
+- Next: Phase 3 workflow (model's own relaxed-ion C_ij) to measure what force errors cost;
+  a long full-data L-BFGS run (warm start from the binaries fit) needs the user's go-ahead.
 
 ## Roadmap
 
