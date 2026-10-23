@@ -185,6 +185,15 @@ python scripts/train_eam.py --train rest --val test --relax --optimizer lbfgs --
     --eval-every 50 --tag eam_v1
 ```
 
+`src/mtpot/elastic/workflow.py` (Phase 3): `TorchCalculator` (ASE calculator for the torch
+model), `elastic_constants(reference, calc)` (24 thermo_pw strains, fractional coordinates
+fixed, BFGS ionic relaxation at fixed cell, stress-strain slopes, zero-strain intercept),
+`predict(atoms, model, mode)`: `dft_cell` (strain the DFT reference cell, as the labels),
+`relax_ions`, `own` (relax cell + ions from the ideal SQS first: deployment).
+`scripts/elastic_eval.py model.pt --ids test --mode dft_cell -j 4` → `models/<tag>_elastic_<mode>.csv`
+(1 torch thread per alloy; minutes per alloy when the model is near an instability).
+`src/mtpot/io/thermo_pw.py`: `tpw_reference` (reference cell from the head of an elast file).
+
 Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_parser_synthetic.py`: parser units, signs, final flags, C_ij refit and CLI round trip
   on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`), including a
@@ -198,6 +207,8 @@ Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
   thermo_pw outputs (caught a swapped e4/e6 column).
 - `tests/test_relax.py`: relax parser vs ASE's reader, relaxed structure = elastic reference,
   crashed run (data tests).
+- `tests/test_elastic.py`: workflow with the torch calculator vs ASE's EAM calculator (setfl),
+  perfect-bcc symmetry (no relaxation, cubic tensor), calculator vs model.
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
   reference rows × (I + ε) with fixed fractional coordinates), and so do `140` and `150`.
@@ -316,8 +327,12 @@ Turn these into pytest tests before refactoring the parser.
   6 of the 15 unlike pair functions.
 - 60 random alloys (100 it.): held-out C11/C12/C44 MAE 115/68/31 GPa, F 0.47 eV/Å — far
   from converged.
-- Next: Phase 3 workflow (model's own relaxed-ion C_ij) to measure what force errors cost;
-  a long full-data L-BFGS run (warm start from the binaries fit) needs the user's go-ahead.
+- **C_ij at DFT positions is not the target**: the binaries model had C_ij errors of ~20 GPa at
+  DFT positions on alloy `01`, but its own relaxed-ion C′ is −80 GPa (DFT +42) and 5 of 24
+  strained relaxations do not converge. Judge models with `elastic_eval.py`, not the training C.
+- Long run `eam_v1` (user-approved): 232 training alloys + 180 relax runs (87/88 excluded),
+  warm start from `bin300`, 500 L-BFGS iterations, ~40 s/iteration (~5.5 h), detached with
+  `nohup setsid`, checkpoint `models/eam_v1.pt` every 25 iterations (resume with `--init`).
 
 ## Roadmap
 
