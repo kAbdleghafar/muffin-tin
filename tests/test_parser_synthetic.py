@@ -91,7 +91,9 @@ def test_frames_works_and_final_flags(tmp_path, run):
     frames, info = parse(tmp_path, run)
     assert len(frames) == N_WORKS * run.n_steps
     assert info["works_total"] == N_WORKS
-    assert info["works_computed"] == info["works_converged"] == set(range(1, N_WORKS + 1))
+    assert info["works_computed"] == info["works_converged"] == info["works_ended"] \
+        == set(range(1, N_WORKS + 1))
+    assert info["works_maxsteps"] == set()
     for w in range(1, N_WORKS + 1):
         fw = [f for f in frames if f["meta"]["work"] == w]
         assert [f["meta"]["ionic_step"] for f in fw] == list(range(1, run.n_steps + 1))
@@ -143,6 +145,20 @@ def test_restart_works_are_detected(tmp_path):
     assert np.allclose(frames[0]["meta"]["strain"], thermo_pw_strain(23))
 
 
+def test_maxsteps_work_is_final_but_not_converged(tmp_path):
+    """BFGS stopped at nstep: thermo_pw uses the last stress, so the frame stays final."""
+    frames, info = parse(tmp_path, make_run(maxstep_works=[5, 21]))
+    assert info["works_maxsteps"] == {5, 21}
+    assert info["works_ended"] == set(range(1, N_WORKS + 1))
+    assert info["works_converged"] == set(range(1, N_WORKS + 1)) - {5, 21}
+    for f in frames:
+        w, s = f["meta"]["work"], f["meta"]["ionic_step"]
+        assert f["meta"]["final"] == (s == 2) and f["meta"]["converged"] == (w not in (5, 21))
+        assert np.allclose(f["pos"], make_run().positions(w, s), atol=1e-6)   # trailing BFGS
+    Cfit, s0 = tpw.refit_cij(frames)                                          # block ignored
+    assert np.abs(Cfit - default_C_kbar()).max() < 0.3
+
+
 # --------------------------------------------------------------------------- CLI round trip
 def run_cli(tmp_path, monkeypatch, *paths):
     out, summary = tmp_path / "dataset.extxyz", tmp_path / "summary.csv"
@@ -161,6 +177,7 @@ def test_cli_extxyz_roundtrip(tmp_path, monkeypatch, run):
     for a in atoms:
         w, s = a.info["work"], a.info["ionic_step"]
         assert a.info["final"] == run.is_final(s)
+        assert a.info["relax_converged"]
         assert a.info["smearing"] == run.smearing
         assert a.info["minus_TS"] == pytest.approx(run.minus_TS_Ry * Ry, abs=1e-9)
         assert np.allclose(a.info["strain_voigt"], engineering(thermo_pw_strain(w)))
@@ -208,6 +225,6 @@ def test_unconverged_work_is_not_final(tmp_path):
     last = [f for f in frames if f["meta"]["work"] == 24]
     assert len(last) == 1 and info["C_tpw_kbar"] is None
     assert not last[0]["meta"]["final"]
-    assert info["works_converged"] == set(range(1, N_WORKS))
+    assert info["works_converged"] == info["works_ended"] == set(range(1, N_WORKS))
     _, s0 = tpw.refit_cij(frames)              # work 24 drops out; 3 points remain for e4
     assert np.allclose(s0, DEFAULT_S0_KBAR, atol=0.01)

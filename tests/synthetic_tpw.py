@@ -42,13 +42,14 @@ class SyntheticRun:
 
     def __init__(self, C_kbar, s0_kbar, works=range(1, N_WORKS + 1), n_steps=2,
                  smearing="Marzari-Vanderbilt", degauss=0.007, minus_TS_Ry=-2.0e-6,
-                 E0_Ry=-400.0):
+                 E0_Ry=-400.0, maxstep_works=()):
         self.C = np.asarray(C_kbar, float)
         self.s0 = np.asarray(s0_kbar, float)
         self.works = list(works)
         self.n_steps = n_steps
         self.smearing, self.degauss = smearing, degauss
         self.minus_TS_Ry, self.E0_Ry = minus_TS_Ry, E0_Ry
+        self.maxstep_works = set(maxstep_works)          # BFGS stops at nstep, not converged
 
     @property
     def nat(self):
@@ -165,6 +166,12 @@ class SyntheticRun:
                 *(s_qe[r] / RY_BOHR3_KBAR), *s_qe[r]) for r in range(3)],
             "",
         ]
+        if self.is_final(step) and work in self.maxstep_works:
+            return out + ["     The maximum number of steps has been reached.", "",
+                          "     End of BFGS Geometry Optimization", "",
+                          "ATOMIC_POSITIONS (crystal)"] + [
+                "{:<3s}  {:20.10f}{:20.10f}{:20.10f}".format(s, *self.frac(step + 1)[k])
+                for k, s in enumerate(self.symbols)] + [""]
         if self.is_final(step):
             out += ["     bfgs converged in   2 scf cycles and   1 bfgs steps",
                     "     End of BFGS Geometry Optimization", "",

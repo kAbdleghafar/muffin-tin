@@ -10,6 +10,8 @@ Usage:
 """
 import argparse, csv, json, sys
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,7 @@ TOL = dict(refit_GPa=0.02, residual_GPa=0.5, noncubic=0.08, electrons=0.05,
            structure_A=2e-4, strain=1e-6, strained_cell_A=1e-4)
 ORDER = ["alloy", "formula", "natoms", "xc", "ecutwfc_Ry", "ecutrho_Ry", "nks", "smearing",
          "degauss_Ry", "nelec", "zval_sum", "works_total", "works_computed", "works_missing",
-         "works_unconverged", "frames", "frames_dropped", "strain_dev", "strained_cell_dev_A",
+         "works_maxsteps", "works_unfinished", "frames", "frames_dropped", "strain_dev", "strained_cell_dev_A",
          "C11_GPa", "C12_GPa", "C44_GPa", "noncubic_frac", "refit_max_diff_GPa",
          "s0_xx_GPa", "s0_yy_GPa", "s0_zz_GPa", "s0_shear_max_GPa", "minus_TS_meV_atom",
          "E_span_meV_atom", "F_max_eV_A", "rho_electrons", "rho_min", "rho_struct_dev_A",
@@ -50,7 +52,7 @@ def qc_alloy(raw, aid, cubes=True):
     frames, info = parse_thermo_pw(str(Path(raw) / f"elast_{aid}.out"), alloy_id=aid)
     ref, st = info["reference"], info["settings"]
     ok = [f for f in frames if f["F"] is not None and f["S"] is not None]
-    computed, converged = info["works_computed"], info["works_converged"]
+    computed, ended = info["works_computed"], info["works_ended"]
     row = dict(alloy=aid, formula=ref.get_chemical_formula(), natoms=len(ref), xc=st["xc"],
                ecutwfc_Ry=_num(st["ecutwfc_Ry"]), ecutrho_Ry=_num(st["ecutrho_Ry"]),
                nks=_num(st["nks"], int), smearing=st["smearing"],
@@ -58,7 +60,8 @@ def qc_alloy(raw, aid, cubes=True):
                zval_sum=float(sum(ZVAL.get(s, np.nan) for s in ref.get_chemical_symbols())),
                works_total=info["works_total"], works_computed=len(computed),
                works_missing=ranges(set(range(1, N_WORKS + 1)) - computed),
-               works_unconverged=ranges(computed - converged),
+               works_maxsteps=ranges(info["works_maxsteps"]),
+               works_unfinished=ranges(computed - ended),
                frames=len(ok), frames_dropped=len(frames) - len(ok))
 
     # strain protocol: each work's strain, and its first ionic step = reference x (I + eps)
@@ -76,8 +79,8 @@ def qc_alloy(raw, aid, cubes=True):
         row.update(C11_GPa=c11, C12_GPa=c12, C44_GPa=c44, noncubic_frac=dev)
     # refit only with all 4 points per strain: a partial (one-sided) fit picks up curvature
     # that thermo_pw's symmetric fit cancels, and would raise false mismatches
-    if converged >= set(range(1, N_WORKS + 1)):
-        Cfit, s0 = refit_cij(frames)                    # kbar, converged final frames
+    if ended >= set(range(1, N_WORKS + 1)):
+        Cfit, s0 = refit_cij(frames)                    # kbar, final frames (BFGS ended)
         if C is not None:
             row["refit_max_diff_GPa"] = float(np.abs(Cfit - C).max() / 10)
         s0 = s0 / 10
@@ -119,8 +122,10 @@ def flags(row):
         out.append(f"works_total ({g('works_total')})")
     if g("works_missing"):
         out.append(f"restart works ({g('works_missing')})")
-    if g("works_unconverged"):
-        out.append(f"unconverged works ({g('works_unconverged')})")
+    if g("works_unfinished"):
+        out.append(f"unfinished works ({g('works_unfinished')})")
+    if g("works_maxsteps"):
+        out.append(f"BFGS step limit ({g('works_maxsteps')})")
     if g("frames_dropped"):
         out.append(f"dropped frames ({g('frames_dropped')})")
     if g("strain_dev", 0) > TOL["strain"] or g("strained_cell_dev_A", 0) > TOL["strained_cell_A"]:
@@ -157,6 +162,18 @@ def _fmt(v):
     return f"{v:.6g}" if isinstance(v, float) else v
 
 
+def _cached_row(raw, aid, cache, cubes, force):
+    cf = cache / f"{aid}.json"
+    row = json.loads(cf.read_text()) if cf.exists() and not force else None
+    if row is None or (cubes and not row.get("cubes_checked")):
+        try:
+            row = qc_alloy(raw, aid, cubes=cubes)
+            cf.write_text(json.dumps(row))
+        except Exception as e:                           # one broken file must not stop a sweep
+            row = {"alloy": aid, "error": f"{type(e).__name__}: {e}"}
+    return row
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("raw", type=Path, help="directory with elast_<id>.out, rho_<id>.cube, elf_<id>.cube")
@@ -164,26 +181,22 @@ def main(argv=None):
     ap.add_argument("--ids", nargs="+", help="alloy ids (default: every elast_*.out in RAW)")
     ap.add_argument("--no-cubes", action="store_true", help="skip the rho/ELF cubes (fast)")
     ap.add_argument("--force", action="store_true", help="ignore cached rows")
+    ap.add_argument("-j", "--jobs", type=int, default=1, help="worker processes")
     args = ap.parse_args(argv)
 
     ids = args.ids or sorted({alloy_id_from_path(p) for p in args.raw.glob("elast_*.out")},
                              key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s))
     cache = args.out.parent / "qc_cache"
     cache.mkdir(parents=True, exist_ok=True)
+    get = partial(_cached_row, args.raw, cache=cache, cubes=not args.no_cubes, force=args.force)
     rows = []
-    for k, aid in enumerate(ids, 1):
-        cf = cache / f"{aid}.json"
-        row = json.loads(cf.read_text()) if cf.exists() and not args.force else None
-        if row is None or (not args.no_cubes and not row.get("cubes_checked")):
-            try:
-                row = qc_alloy(args.raw, aid, cubes=not args.no_cubes)
-                cf.write_text(json.dumps(row))
-            except Exception as e:                       # one broken file must not stop a sweep
-                row = {"alloy": aid, "error": f"{type(e).__name__}: {e}"}
-        row["flags"] = "; ".join(flags(row))
-        rows.append(row)
-        print(f"[{k}/{len(ids)}] {aid:>4} {row.get('formula', '?'):<22} {row['flags'] or 'ok'}",
-              flush=True)
+    with ProcessPoolExecutor(args.jobs) as ex:
+        results = ex.map(get, ids) if args.jobs > 1 else map(get, ids)
+        for k, (aid, row) in enumerate(zip(ids, results), 1):
+            row["flags"] = "; ".join(flags(row))
+            rows.append(row)
+            print(f"[{k}/{len(ids)}] {aid:>4} {row.get('formula', '?'):<22} "
+                  f"{row['flags'] or 'ok'}", flush=True)
 
     keys = [k for k in ORDER if any(k in r for r in rows)]
     with open(args.out, "w", newline="") as fh:

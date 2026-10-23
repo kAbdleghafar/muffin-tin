@@ -13,7 +13,7 @@ The DFT electron density (rho) and ELF are used to shape the model's physics
 (atom-centred density functions, angular terms). **Energies, forces and stresses are the
 fitting targets** — rho/ELF alone cannot determine the energy.
 
-## Data (252 alloys, 3 files each)
+## Data (255 alloys, 3 files each)
 
 | File | Contents |
 |---|---|
@@ -21,18 +21,23 @@ fitting targets** — rho/ELF alone cannot determine the energy.
 | `rho_<id>.cube` | QE pp.x valence density (pseudo + augmentation), e/bohr³, unstrained reference cell |
 | `elf_<id>.cube` | QE pp.x ELF on the same grid and structure |
 
-Full data set: three Google Drive files from the user —
-`19ncdMpoeH1ACApIul9PHoFghg0jFWXKq`, `1iozSRV_pG14wqAj0kjVXkZhGpsZUUVc8`,
-`1c8yQFm7i_OejH3GtDaqPxJiSpvjyr_jH` (download:
-`https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t`; the cloud
-environment's network policy must allow `drive.google.com` and `drive.usercontent.google.com`).
-Samples examined so far: `01`, `140`, `150`. Raw files are 4–30 MB each (~13 GB of cubes
+Full data set: three RAR archives on the user's Google Drive (shared "anyone with the link"):
+`elast.rar` `19ncdMpoeH1ACApIul9PHoFghg0jFWXKq` (1.1 GB → 6.0 GB),
+`rho.rar` `1iozSRV_pG14wqAj0kjVXkZhGpsZUUVc8` (1.4 GB → 5.9 GB),
+`elf.rar` `1c8yQFm7i_OejH3GtDaqPxJiSpvjyr_jH` (1.3 GB → 5.9 GB). Download with
+`curl -L -o X.rar "https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t"`
+(network policy must allow `drive.google.com`, `drive.usercontent.google.com`), extract with
+`unrar e` (`apt-get install unrar`) into a scratch dir, move into `data/raw/`, delete the
+archive (disk is tight: ~17 GB unpacked). Archives hold flat `<kind>_<id>.<ext>` files only.
+255 alloys: IDs 1–259 except 107, 108, 109, 240 (IDs 1–9 are zero-padded: `01`…`09`).
+Samples examined so far: `01`, `140`, `150`. Raw files are 4–30 MB each (~12 GB of cubes
 in total): never load all cubes at once, process one alloy at a time and cache reduced
 results (`.npz`).
 
 ### DFT settings (verified in samples)
 - Quantum ESPRESSO + thermo_pw, PBEsol, PAW with core corrections
 - ecutwfc 55 Ry, ecutrho 550 Ry, scf threshold 1e-8, BFGS ionic relaxation, fixed cell per strain
+  (`nstep` = 20; BFGS criteria energy < 5e-6 Ry, force < 5e-4 Ry/bohr)
 - Valence (Zval): Ti 12, Zr 12, Nb 13, Mo 14, Hf 12, **Ta 27 (4f in valence)**
 - Smearing is **not consistent**: `01` Marzari–Vanderbilt 0.007 Ry; `140`, `150` Gaussian 0.009 Ry
 - Supercells are bcc-based, aligned with cubic axes, slightly triclinic after relaxation:
@@ -82,9 +87,12 @@ so predictions are comparable to the DFT labels.
 `scripts/tpw_to_dataset.py` (working, validated):
 - `parse_thermo_pw(path)` → `(frames, info)`; frames carry energy, forces, stress, cell,
   positions, strain, work index, ionic step, `final` flag and −TS. `final` = last ionic step
-  of a work whose BFGS converged (`info["works_converged"]`); unconverged works have none.
+  of a work whose BFGS ended — converged, or stopped at the `nstep` limit (thermo_pw uses that
+  stress for C_ij too); per-frame `converged`. `info` sets: `works_computed`, `works_ended`,
+  `works_converged`, `works_maxsteps`. A run cut off mid-relaxation has no final frame.
 - Writes `dataset.extxyz` (ASE SinglePointCalculator; info keys: `alloy`, `work`,
-  `ionic_step`, `final`, `strain_voigt`, `minus_TS`, `smearing`) and `elastic_summary.csv`.
+  `ionic_step`, `final`, `relax_converged`, `strain_voigt`, `minus_TS`, `smearing`) and
+  `elastic_summary.csv`.
 - `refit_cij()` re-derives C_ij from relaxed stresses as a check; `cubic_projection()`.
 
 ```bash
@@ -97,25 +105,26 @@ python scripts/tpw_to_dataset.py data/raw/elast_*.out \
 `src/mtpot/dft.py`: Zval table and expected settings.
 
 `scripts/qc.py` (Phase 0): one row per alloy → `data/processed/qc.csv`, with a `flags` column
-(settings, nelec vs ΣZval, restart/unconverged works, dropped frames, strain protocol,
+(settings, nelec vs ΣZval, restart works, BFGS step limit, unfinished works, dropped frames,
+strain protocol,
 non-cubic > 8%, refit mismatch > 0.02 GPa, residual stress > 0.5 GPa, rho electron count,
 ELF range, cube grid/structure). Rows are cached in `data/processed/qc_cache/<id>.json`, so a
-sweep resumes; `--no-cubes` skips the cubes (~2 s/alloy instead of ~5 s). The refit and
-residual stress are only computed when all 24 works converged (a one-sided fit picks up
+sweep resumes; `--no-cubes` skips the cubes; `-j 4` runs 4 worker processes. The refit and
+residual stress are only computed when all 24 relaxations ended (a one-sided fit picks up
 curvature). Sample `01`: no flags.
 
 ```bash
-python scripts/qc.py data/raw -o data/processed/qc.csv
+python scripts/qc.py data/raw -o data/processed/qc.csv -j 4
 ```
 
 Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_parser_synthetic.py`: parser units, signs, final flags, C_ij refit and CLI round trip
   on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`), including a
-  run killed mid-relaxation (its last work must not be `final`).
+  run killed mid-relaxation (its last work must not be `final`) and BFGS stopped at `nstep`.
 - `tests/test_qc.py`: QC sweep, flags and cache on synthetic alloys and cubes.
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
-  reference rows × (I + ε) with fixed fractional coordinates); `140`, `150` not yet uploaded.
+  reference rows × (I + ε) with fixed fractional coordinates), and so do `140` and `150`.
 
 ## Regression fixtures (from the three samples)
 
@@ -144,7 +153,7 @@ Turn these into pytest tests before refactoring the parser.
 2. **Mixed smearing schemes** across alloys: always correct to E0 and store the scheme
    as metadata; check for systematic C_ij differences between schemes.
 3. **Narrow configuration coverage**: within an alloy, energies span only 1–1.6 meV/atom and
-   |F| < 0.16 eV/Å. A potential trained only on this may fail to relax a fresh SQS from
+   |F| ≲ 0.16 eV/Å (max 0.162 in `150`). A potential trained only on this may fail to relax a fresh SQS from
    ideal positions. Plan to add the vc-relax trajectories (ask the user for them) and
    ±3–5% volume scans.
 4. **Ionic steps are near-duplicates** (~10 per work): weight per work, not per frame,
