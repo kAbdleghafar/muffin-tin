@@ -121,11 +121,29 @@ curvature). Sample `01`: no flags.
 python scripts/qc.py data/raw -o data/processed/qc.csv -j 4
 ```
 
+`src/mtpot/density/` (Phase 1): `grid` (periodic grid-point/atom pairs), `basis`
+(`RadialBasis` cubic B-splines with C2 cutoff; `ExpBasis`), `fit` (`sample_alloy`,
+`DensityFit` with core mask, monotone / non-negative / background options, `metrics`),
+`profiles` (radial profiles, shell angular power with real Y_lm to l = 4).
+`scripts/density_phase1.py`: `prepare` (one pass per alloy over rho/ELF cubes →
+`data/processed/density/<id>.npz`, ~15 s and 20 MB each), `fit`, `angular` (slow:
+~30 s/alloy), `report` (→ `reports/phase1/`). Train/test sets: `binaries`, `test`.
+
+```bash
+python scripts/density_phase1.py prepare --ids binaries test -j 4
+python scripts/density_phase1.py fit --train binaries --test test --r-core all=1.0 \
+    --rc 6.0 --n-int 27 --lam 1e-6 --monotone --oracle --tag binaries
+python scripts/density_phase1.py angular --ids binaries test --tag binaries
+python scripts/density_phase1.py report --ids binaries test --tag binaries
+```
+
 Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_parser_synthetic.py`: parser units, signs, final flags, C_ij refit and CLI round trip
   on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`), including a
   run killed mid-relaxation (its last work must not be `final`) and BFGS stopped at `nstep`.
 - `tests/test_qc.py`: QC sweep, flags and cache on synthetic alloys and cubes.
+- `tests/test_density.py`: neighbour pairs vs brute force, basis cutoff, recovery of known
+  f_Z from synthetic triclinic superpositions (incl. monotone), harmonic analysis.
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
   reference rows × (I + ε) with fixed fractional coordinates), and so do `140` and `150`.
@@ -197,13 +215,30 @@ Turn these into pytest tests before refactoring the parser.
   all described under "Known data issues"; nothing else inconsistent.
 - Full sweep: ~75 s for thermo_pw outputs with `-j 4`; ~14 min with cubes from a cold disk.
 
+## Phase 1 results (23 binaries; details and figures in `reports/phase1/README.md`)
+
+- Core mask 1.0 Å for all species: inside it every element's profile is identical across
+  alloys and atoms (< 1.3 %); ELF minimum (semicore/valence boundary) at 1.0–1.2 Å.
+- Monotone spline f_Z (r_c 6 Å) trained on binaries reproduce rho outside the mask to 3.2 %
+  (train) / 3.4 % (23 held-out 3–6-element alloys) relative RMS; 3.1 % when each held-out
+  alloy is fitted on its own. Transfer works; Zr (2 binaries only) is the weakest.
+- **Ill-posed where EAM needs it**: equally good fits (monotone, unconstrained,
+  exponential) disagree at neighbour distances; the implied ρ̄ᵢ at atom sites differ in
+  mean and even sign (correlation 0.02–0.36). rho does not determine f_Z beyond ~2.3 Å.
+- Residual is 1–3 % of the local density and mostly l = 4 (cubic), with a group-dependent
+  sign: Mo/Nb/Ta excess toward ⟨111⟩, Ti/Hf (and mostly Zr) toward ⟨100⟩ — directional
+  d-bonding linked to C′/C44.
+- For Phase 2: learn f_Z from energies/forces/stresses (rho only as a soft prior for
+  r < 2.3 Å or as per-atom shell-density targets); EAM baseline plus one angular channel
+  as an ablation.
+
 ## Roadmap
 
 **Phase 0 – ingestion & QC (done, see "Phase 0 results").** Parse all 255 alloys; one QC table: settings, smearing,
 works present, frames, residual stress, refit-vs-thermo_pw difference, rho electron count.
 Flag anything inconsistent.
 
-**Phase 1 – density functions (the muffin-tin part).** Fit per-species radial functions
+**Phase 1 – density functions (the muffin-tin part) (done on binaries, see "Phase 1 results").** Fit per-species radial functions
 f_Z(r) so that Σ_i f_Zi(|r − R_i|) reproduces DFT rho outside a per-species core mask.
 Use splines with a smooth cutoff (~5.5–6 Å; bcc neighbour shells at ~2.8, 3.25, 4.6, 5.4 Å).
 Analyse the residual (DFT − superposition) and ELF for non-spherical, bonding content
