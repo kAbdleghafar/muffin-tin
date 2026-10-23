@@ -63,38 +63,72 @@ def design(sample, basis, keep=None):
     return A if keep is None else A[keep]
 
 
-class DensityFit:
-    """Accumulate normal equations over alloys, then solve with a smoothness penalty."""
+def background_columns(sample):
+    """Uniform-background regressors: atoms of each species per cell volume (1/Angstrom^3)."""
+    vol = abs(np.linalg.det(sample["cell"]))
+    sym = [SPECIES.index(s) for s in __import__("ase").Atoms(numbers=sample["numbers"]).get_chemical_symbols()]
+    return np.bincount(sym, minlength=len(SPECIES)) / vol
 
-    def __init__(self, basis, r_core):
-        self.basis, self.r_core = basis, r_core
-        nc = len(SPECIES) * basis.size
+
+class DensityFit:
+    """Accumulate normal equations over alloys, then solve with a smoothness penalty.
+
+    background=True adds a uniform density sum_Z (N_Z / V) * beta_Z per alloy: delocalised
+    electrons that spherical atomic functions can only mimic with flat, long tails.
+    beta_Z / Bohr^3 is then the background charge per atom of species Z (electrons)."""
+
+    def __init__(self, basis, r_core, background=False):
+        self.basis, self.r_core, self.background = basis, r_core, background
+        self.nf = len(SPECIES) * basis.size
+        nc = self.nf + (len(SPECIES) if background else 0)
         self.G, self.g, self.n = np.zeros((nc, nc)), np.zeros(nc), 0
         self.coef = None
 
+    def full_design(self, sample, keep=None):
+        A = design(sample, self.basis, keep)
+        if self.background:
+            A = np.hstack([A, np.broadcast_to(background_columns(sample), (len(A), len(SPECIES)))])
+        return A
+
     def add(self, sample, weight=1.0):
         keep = outside_core(sample, self.r_core)
-        A = design(sample, self.basis, keep)
+        A = self.full_design(sample, keep)
         self.G += weight * A.T @ A
         self.g += weight * A.T @ sample["rho"][keep]
         self.n += keep.sum()
 
-    def solve(self, lam=1e-3, nonneg=True):
-        """lam scales the second-difference penalty relative to the mean diagonal of G.
+    def solve(self, lam=1e-3, nonneg=True, monotone=False):
+        """lam scales the basis penalty (second differences for splines, ridge for the
+        exponential basis) relative to the mean diagonal of G.
+        monotone: spline f_Z non-increasing and >= 0 (coefficients written as tail sums of
+        non-negative increments; implies nonneg). Without it, a crystal's near-discrete
+        neighbour distances let oscillating tails compensate each other at almost no cost.
         Species absent from the training data get zero coefficients."""
-        nb = self.basis.size
-        P = np.kron(np.eye(len(SPECIES)), self.basis.penalty())
-        present = np.repeat([self.G[k * nb:(k + 1) * nb, k * nb:(k + 1) * nb].trace() > 0
-                             for k in range(len(SPECIES))], nb)
+        nb, ns = self.basis.size, len(SPECIES)
+        nc = len(self.g)
+        P = np.zeros((nc, nc))
+        P[:self.nf, :self.nf] = np.kron(np.eye(ns), self.basis.penalty())
+        blocks = [self.G[k * nb:(k + 1) * nb, k * nb:(k + 1) * nb].trace() > 0 for k in range(ns)]
+        present = np.concatenate([np.repeat(blocks, nb), np.diag(self.G)[self.nf:] > 0])
         G = self.G[np.ix_(present, present)]
         H = G + lam * np.mean(np.diag(G)) * P[np.ix_(present, present)]
+        H += 1e-12 * np.mean(np.diag(G)) * np.eye(len(H))           # conditioning only
         g = self.g[present]
-        if nonneg:                                    # min c'Hc - 2g'c, c >= 0, as an NNLS
+        if monotone:                                  # c = T delta, delta >= 0
+            n_bg = present[self.nf:].sum()
+            T = np.zeros((len(g), len(g)))
+            k = present[:self.nf].sum()
+            T[:k, :k] = np.kron(np.eye(k // nb), np.triu(np.ones((nb, nb))))
+            T[k:, k:] = np.eye(n_bg)
+            L = cholesky(T.T @ H @ T, lower=True)
+            delta, _ = nnls(L.T, solve_triangular(L, T.T @ g, lower=True), maxiter=50 * len(g))
+            c = T @ delta
+        elif nonneg:                                  # min c'Hc - 2g'c, c >= 0, as an NNLS
             L = cholesky(H, lower=True)
             c, _ = nnls(L.T, solve_triangular(L, g, lower=True), maxiter=50 * len(g))
         else:
             c = cho_solve(cho_factor(H), g)
-        self.coef = np.zeros(len(self.g))
+        self.coef = np.zeros(nc)
         self.coef[present] = c
         return self
 
@@ -103,8 +137,13 @@ class DensityFit:
         k = SPECIES.index(symbol)
         return self.basis(self.coef[k * nb:(k + 1) * nb], r)
 
+    def background_electrons(self):
+        """Uniform-background charge per atom of each species (electrons), if fitted."""
+        from ase.units import Bohr
+        return dict(zip(SPECIES, self.coef[self.nf:] / Bohr**3)) if self.background else {}
+
     def predict(self, sample, keep=None):
-        return design(sample, self.basis, keep) @ self.coef
+        return self.full_design(sample, keep) @ self.coef
 
 
 def metrics(fit, sample):

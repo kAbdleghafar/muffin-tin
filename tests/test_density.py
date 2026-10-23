@@ -76,6 +76,10 @@ def test_fit_recovers_known_radial_functions():
     m = metrics(fit, samples[2])                                     # held-out composition
     assert m["rel_rmse"] < 1e-2 and m["r2"] > 0.999
     assert np.all(fit.f("Ta", r) == 0)                               # absent species
+    fit.solve(lam=1e-8, monotone=True)                               # truth is monotone
+    for sym, f in TRUE.items():
+        y = fit.f(sym, r)
+        assert np.all(np.diff(y) <= 1e-12) and np.allclose(y, f(r), atol=2e-3 * f(0.8)), sym
 
 
 def test_core_mask_and_nearest():
