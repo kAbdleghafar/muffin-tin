@@ -1,0 +1,86 @@
+"""Training data: per-alloy frame sets from thermo_pw outputs, with neighbour lists.
+
+Ionic steps within a work are near-duplicates (CLAUDE.md, data issue 4), so each work keeps
+its first step (largest forces) and its final step (relaxed stress, used for C_ij), each
+weighted 1/2 (1 if the work has a single step). Energies are E0: F - (-TS)/2 for Gaussian
+smearing, F for Marzari-Vanderbilt."""
+import numpy as np
+from ase import Atoms
+from ase.neighborlist import neighbor_list
+
+from tpw_to_dataset import parse_thermo_pw, voigt_stress, voigt_strain
+
+from .eam import SPECIES
+
+KBAR_EV_A3 = 0.1 / 160.21766208          # 1 kbar in eV/A^3
+
+
+def e0_energy(frame, smearing):
+    mts = frame.get("mTS", 0.0)
+    return frame["E"] - 0.5 * mts if smearing.lower().startswith("gauss") else frame["E"]
+
+
+def build_alloy(path, rc=6.0):
+    """Arrays for one alloy: stacked frames (same atom count), labels, neighbour lists."""
+    frames, info = parse_thermo_pw(str(path))
+    smearing = (info["settings"]["smearing"] or "").split()[0]
+    ok = [f for f in frames if f["F"] is not None and f["S"] is not None]
+    by_work = {}
+    for f in ok:
+        by_work.setdefault(f["meta"]["work"], []).append(f)
+    keep, weight = [], []
+    for w, fs in sorted(by_work.items()):
+        sel = [fs[0]] + ([fs[-1]] if len(fs) > 1 else [])
+        keep += sel
+        weight += [1.0 / len(sel)] * len(sel)
+    ref = info["reference"]
+    species = np.array([SPECIES.index(s) for s in ref.get_chemical_symbols()], dtype=np.int8)
+    nl_i, nl_j, nl_S, ptr = [], [], [], [0]
+    for f in keep:
+        at = Atoms(f["symbols"], positions=f["pos"], cell=f["cell"], pbc=True)
+        i, j, S = neighbor_list("ijS", at, rc)
+        nl_i.append(i.astype(np.int16)); nl_j.append(j.astype(np.int16)); nl_S.append(S.astype(np.int8))
+        ptr.append(ptr[-1] + len(i))
+    final = np.array([f["meta"]["final"] for f in keep])
+    C = info["C_tpw_kbar"]
+    return dict(
+        alloy=info["alloy"], smearing=smearing, species=species,
+        positions=np.array([f["pos"] for f in keep]), cells=np.array([f["cell"] for f in keep]),
+        energy=np.array([e0_energy(f, smearing) for f in keep]),
+        forces=np.array([f["F"] for f in keep]),
+        stress=np.array([voigt_stress(f["S"]) for f in keep]),            # ASE sign, eV/A^3
+        strain=np.array([voigt_strain(f["meta"]["strain"]) for f in keep]),
+        work=np.array([f["meta"]["work"] for f in keep], dtype=np.int16),
+        step=np.array([f["meta"]["ionic_step"] for f in keep], dtype=np.int16),
+        final=final, converged=np.array([f["meta"]["converged"] for f in keep]),
+        weight=np.array(weight), works_ended=np.array(sorted(info["works_ended"])),
+        C_GPa=(C / 10.0) if C is not None else np.full((6, 6), np.nan),
+        nl_i=np.concatenate(nl_i), nl_j=np.concatenate(nl_j), nl_S=np.concatenate(nl_S),
+        nl_ptr=np.array(ptr, dtype=np.int64), rc=rc)
+
+
+def frame_graphs(d):
+    """Frame graphs (as eam.frame_graph produces) for every frame of a built alloy."""
+    out = []
+    for k in range(len(d["energy"])):
+        a, b = d["nl_ptr"][k], d["nl_ptr"][k + 1]
+        out.append(dict(positions=d["positions"][k], cell=d["cells"][k],
+                        species=d["species"].astype(np.int64),
+                        i=d["nl_i"][a:b].astype(np.int64), j=d["nl_j"][a:b].astype(np.int64),
+                        S=d["nl_S"][a:b].astype(np.float64)))
+    return out
+
+
+def composition(d):
+    return np.bincount(d["species"], minlength=len(SPECIES))
+
+
+def reference_energies(alloys):
+    """Per-species chemical potentials mu_Z (eV/atom) from a least-squares fit of every
+    frame's E0 to its composition; subtracting them leaves formation-like energies."""
+    A = np.array([composition(d) for d in alloys for _ in d["energy"]], dtype=float)
+    y = np.concatenate([d["energy"] for d in alloys])
+    used = A.sum(0) > 0
+    mu = np.zeros(len(SPECIES))
+    mu[used] = np.linalg.lstsq(A[:, used], y, rcond=None)[0]
+    return mu

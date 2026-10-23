@@ -30,6 +30,7 @@ from mtpot.density.fit import SPECIES, DensityFit, metrics, sample_alloy
 from mtpot.density.grid import grid_positions, neighbour_pairs
 from mtpot.density.profiles import atom_pairs, radial_profiles, shell_power
 from mtpot.io.cube import read_cube
+from mtpot.splits import alloy_sets, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW, OUT = ROOT / "data" / "raw", ROOT / "data" / "processed" / "density"
@@ -40,31 +41,6 @@ INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 SHELLS = (1.2, 1.4, 1.6)          # Angstrom; nearest-neighbour distance is ~2.8
 SHELL_HALF = 0.04
 PROFILE_RMAX, PROFILE_DR = 3.0, 0.02
-
-
-def alloy_sets(qc_csv=ROOT / "data" / "processed" / "qc.csv", per_group=6, seed=0):
-    """'binaries': all 2-element alloys; 'test': per_group random alloys with 3, 4 and 5
-    elements plus every 6-element alloy (fixed seed)."""
-    with open(qc_csv, newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    nel = {r["alloy"]: len(set(re.findall(r"[A-Z][a-z]?", r["formula"]))) for r in rows}
-    rng = np.random.default_rng(seed)
-    test = []
-    for n in (3, 4, 5):
-        ids = sorted(a for a, k in nel.items() if k == n)
-        test += sorted(rng.choice(ids, min(per_group, len(ids)), replace=False).tolist())
-    test += sorted(a for a, k in nel.items() if k == 6)
-    key = lambda a: int(a)
-    return {"binaries": sorted((a for a, k in nel.items() if k == 2), key=key),
-            "test": sorted(test, key=key)}
-
-
-def resolve(names):
-    sets = alloy_sets()
-    out = []
-    for n in names:
-        out += sets.get(n, [n])
-    return out
 
 
 # ------------------------------------------------------------------------------- prepare
