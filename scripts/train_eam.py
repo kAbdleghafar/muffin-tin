@@ -30,8 +30,13 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--batch-alloys", type=int, default=4)
     ap.add_argument("--reg", type=float, default=1e-4)
-    ap.add_argument("--w", default="E=1,F=1,S=1,C=1,rE=1,rF=1,rS=0.25",
-                    help="loss weights (rE/rF/rS: relax sets)")
+    ap.add_argument("--w", default="E=1,F=1,S=1,C=1,rE=1,rF=1,rS=0.25,H=10,R=1,kmin=0.5",
+                    help="loss weights (rE/rF/rS: relax sets; H: stability, R: relaxed-ion C, "
+                         "kmin: minimum force-constant eigenvalue in eV/A^2)")
+    ap.add_argument("--hessian-train", type=int, default=24,
+                    help="training alloys with Hessian terms (stratified by element count)")
+    ap.add_argument("--hessian-val", action="store_true",
+                    help="report stability and relaxed-ion C on all validation alloys")
     ap.add_argument("--relax", action="store_true",
                     help="add vc-relax trajectories of the training alloys (val: report only)")
     ap.add_argument("--exclude-relax", nargs="*", default=[],
@@ -67,6 +72,21 @@ def main(argv=None):
         sets["train_relax"] = [AlloyBatch(d, mu) for d in
                                read_relax([a for a in train_ids if a not in args.exclude_relax])]
         sets["val_relax"] = [AlloyBatch(d, mu) for d in read_relax(val_ids)]
+    if args.hessian_train:
+        from mtpot.splits import n_elements
+        nel = n_elements()
+        rng = np.random.default_rng(1)
+        pool = {}
+        for ab in sets["train"]:
+            pool.setdefault(nel[ab.alloy], []).append(ab)
+        quota = {k: max(1, round(args.hessian_train * len(v) / len(sets["train"]))) for k, v in pool.items()}
+        for k, v in pool.items():
+            for i in rng.choice(len(v), min(quota[k], len(v)), replace=False):
+                v[i].hessian = True
+        print("Hessian terms on", sorted((ab.alloy for ab in sets["train"] if ab.hessian), key=int), flush=True)
+    if args.hessian_val:
+        for ab in sets["val"]:
+            ab.hessian = True
     train = sets["train"] + sets.get("train_relax", [])
     del raw_train, raw_val
     print(f"loaded {', '.join(f'{len(v)} {k}' for k, v in sets.items())} in "

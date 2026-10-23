@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .data import composition, frame_graphs, reference_energies
+from .data import composition, frame_graphs, reference_energies, reference_graph
 from .eam import EAM, SPECIES, collate
+from .hessian import full_hessian, hessian_terms, stability_penalty
 
 EV_A3_GPA = 160.21766208
 VOIGT_OF_BLOCK = [0, 1, 2, 5, 4, 3]       # works 1-4 e1, 5-8 e2, 9-12 e3, 13-16 e6, 17-20 e5, 21-24 e4
@@ -21,6 +22,9 @@ class AlloyBatch:
     def __init__(self, d, mu):
         self.alloy = str(d["alloy"])
         self.relax = "energy_group" in d
+        self.hessian = False                 # set by the caller for the Hessian subset
+        self.ref_graph = reference_graph(d) if "ref_positions" in d else None
+        self.C_dft = torch.as_tensor(d["C_GPa"], dtype=torch.float64) if "C_GPa" in d else None
         self.groups = torch.as_tensor(d["energy_group"].astype(np.int64)) if self.relax else None
         self.batch = collate(frame_graphs(d))
         nat = len(d["species"])
@@ -83,6 +87,8 @@ def group_centred(x, groups, w):
 
 
 def evaluate(model, ab, create_graph=False, cij=True):
+    """Residuals of one alloy; Hessian terms (force-constant eigenvalues at the DFT reference,
+    relaxed-ion C by implicit differentiation) when ab.hessian is set."""
     out = model(ab.batch, create_graph=create_graph)
     e = out["energy"] / ab.nat
     dE = e - ab.e_target
@@ -94,6 +100,12 @@ def evaluate(model, ab, create_graph=False, cij=True):
         C = cij_from_stress(out["stress"] * EV_A3_GPA, ab.cij)
         res["C"] = C
         res["dC"] = C - ab.cij[2]
+    if ab.hessian and ab.ref_graph is not None:
+        H, vol = full_hessian(model, ab.ref_graph, create_graph=create_graph)
+        eig, _, C_rel = hessian_terms(H, vol, ab.nat)
+        res["eig"], res["C_rel"] = eig, C_rel
+        if ab.C_dft is not None and not torch.isnan(ab.C_dft).any():
+            res["dC_rel"] = C_rel - ab.C_dft
     return res
 
 
@@ -108,6 +120,11 @@ def loss_of(res, ab, w):
     if "dC" in res and w.get("C", 0) > 0:
         dC = 0.5 * (res["dC"] + res["dC"].T)
         L = L + w["C"] * ((dC / 5.0) ** 2).mean()
+    if "eig" in res and w.get("H", 0) > 0:
+        L = L + w["H"] * stability_penalty(res["eig"], w.get("kmin", 0.5))
+    if "dC_rel" in res and w.get("R", 0) > 0 and res["eig"].min() > 0:   # only once stable
+        dC = 0.5 * (res["dC_rel"] + res["dC_rel"].T)
+        L = L + w["R"] * ((dC / 5.0) ** 2).mean()
     return L
 
 
@@ -122,7 +139,7 @@ def summarize(model, alloys):
     C11/C12/C44 errors from stress slopes."""
     se_e = se_f = se_s = 0.0
     n_e = n_f = n_s = 0.0
-    cub = []
+    cub, rel, eig_min = [], [], []
     with torch.enable_grad():
         for ab in alloys:
             res = {k: v.detach() for k, v in evaluate(model, ab).items()}
@@ -131,6 +148,10 @@ def summarize(model, alloys):
             se_s += float((ab.w[:, None] * res["dS"] ** 2).sum()); n_s += 6 * float(ab.w.sum())
             if "C" in res:
                 cub.append((cubic(res["C"]).numpy(), cubic(ab.cij[2]).numpy()))
+            if "eig" in res:
+                eig_min.append(float(res["eig"].min()))
+                if "dC_rel" in res:
+                    rel.append((cubic(res["C_rel"]).numpy(), cubic(ab.C_dft).numpy(), eig_min[-1] > 0))
     out = dict(E_meV_atom=1e3 * np.sqrt(se_e / n_e), F_eV_A=np.sqrt(se_f / n_f),
                S_GPa=np.sqrt(se_s / n_s))
     if cub:
@@ -138,6 +159,14 @@ def summarize(model, alloys):
         for k, name in enumerate(["C11", "C12", "C44"]):
             out[f"{name}_MAE"] = float(np.abs(p[:, k] - t[:, k]).mean())
         out["n_cij"] = len(cub)
+    if eig_min:
+        out["stable_frac"] = float(np.mean(np.array(eig_min) > 0))
+        out["eig_min_median"] = float(np.median(eig_min))
+    stable = [r for r in rel if r[2]]
+    if stable:                                  # relaxed-ion C of the stable alloys only
+        p, t = np.array([r[0] for r in stable]), np.array([r[1] for r in stable])
+        for k, name in enumerate(["C11", "C12", "C44"]):
+            out[f"rel_{name}_MAE"] = float(np.abs(p[:, k] - t[:, k]).mean())
     return out
 
 

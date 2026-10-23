@@ -64,3 +64,21 @@ def test_relax_sets_use_energy_differences_within_groups():
     y = group_centred(x, g, w)
     assert torch.allclose(y, torch.tensor([-1.25, -0.25, 0.75, 0.0], dtype=torch.float64))
     assert torch.allclose(group_centred(x + 5.0, g, w), y)              # shift-invariant
+
+
+def test_hessian_terms_in_training(built):
+    _, d = built
+    assert "ref_positions" in d and len(d["ref_i"]) > 0
+    ab = AlloyBatch(d, reference_energies([d]))
+    ab.hessian = True
+    m = init_model(EAM(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
+    res = evaluate(m, ab, create_graph=True)
+    assert res["eig"].shape == (3 * ab.nat,) and res["C_rel"].shape == (6, 6)
+    w0 = dict(E=1, F=1, S=1, C=1)
+    L0 = loss_of(res, ab, w0)
+    L1 = loss_of(res, ab, dict(w0, H=1.0, kmin=1e3))                     # every mode below kmin
+    assert L1 > L0
+    L1.backward()                                                        # differentiable
+    assert all(p.grad is not None for p in m.parameters())
+    s = summarize(m, [ab])
+    assert 0.0 <= s["stable_frac"] <= 1.0
