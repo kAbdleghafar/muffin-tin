@@ -10,4 +10,5 @@ __pycache__/
 data/processed/qc_cache/
 data/processed/density/
 data/processed/train/
-models/*.log
+models/*
+!models/README.md
