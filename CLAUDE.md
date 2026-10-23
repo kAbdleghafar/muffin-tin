@@ -30,6 +30,20 @@ Full data set: three RAR archives on the user's Google Drive (shared "anyone wit
 `unrar e` (`apt-get install unrar`) into a scratch dir, move into `data/raw/`, delete the
 archive (disk is tight: ~17 GB unpacked). Archives hold flat `<kind>_<id>.<ext>` files only.
 255 alloys: IDs 1–259 except 107, 108, 109, 240 (IDs 1–9 are zero-padded: `01`…`09`).
+
+Relaxation data (user's Drive, `relax.rar`, id `1esbO_so0KSDYCu4tX8pQlpnJKMtVH_uR`, 226 MB →
+1.2 GB; archive files `relax/Alloy_<id>.out`), stored as:
+- `data/raw/relax_<id>.out` (203): pw.x **vc-relax** from the ideal SQS (bcc sites) to the
+  relaxed cell, plus pw.x's final SCF at the relaxed structure (fresh G-vectors). 11,982 SCF
+  steps. Settings vary: cutoffs 55/550 (110 runs), 60/500 (93); Gaussian 0.007 Ry (197) or
+  0.009 (18) — absolute energies are **not** comparable with the elastic runs or across
+  settings; use energy differences within a run. `180` failed before any SCF; `179` crashed
+  after 10 SCF steps; 10 runs stopped at 100 BFGS steps.
+- `data/raw/elastprev_<id>.out` (12: `81 83 84 85 99–106`): earlier thermo_pw elastic runs
+  (Feb–Apr 2026, 60/550 Ry, Gaussian 0.007) on the same reference cells; `101 102 105 106` were
+  interrupted (1–3 works). Parse with `parse_thermo_pw`.
+- No relax run for 52 alloys: `81`–`85`, `99`–`106`, `110`–`134`, `219`–`232` (for the 12
+  `elastprev` IDs the archive held the earlier elastic run instead of a relaxation).
 Samples examined so far: `01`, `140`, `150`. Raw files are 4–30 MB each (~12 GB of cubes
 in total): never load all cubes at once, process one alloy at a time and cache reduced
 results (`.npz`).
@@ -121,6 +135,13 @@ curvature). Sample `01`: no flags.
 python scripts/qc.py data/raw -o data/processed/qc.csv -j 4
 ```
 
+`src/mtpot/io/pwscf.py`: `parse_pw_relax(path)` → `(frames, info)` for pw.x (vc-)relax outputs
+(per SCF: E, −TS, F, S, cell, positions, `kind` = `bfgs`/`final_scf`; info: settings,
+converged, maxsteps, final_scf, done, initial/relaxed structures). Agrees with ASE's pw.x
+reader (F 1e-7 eV/Å, S 2e-9 eV/Å³, cell/positions 5e-5 Å). `scripts/qc_relax.py` →
+`data/processed/relax_qc.csv` (settings, convergence, trajectory span, relaxed vs elastic
+reference; ~50 s with `-j 4`).
+
 `src/mtpot/density/` (Phase 1): `grid` (periodic grid-point/atom pairs), `basis`
 (`RadialBasis` cubic B-splines with C2 cutoff; `ExpBasis`), `fit` (`sample_alloy`,
 `DensityFit` with core mask, monotone / non-negative / background options, `metrics`),
@@ -165,6 +186,8 @@ Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
   splines, setfl export vs ASE's EAM calculator.
 - `tests/test_potential_data.py`: training-set builder and C_ij-from-stress on synthetic
   thermo_pw outputs (caught a swapped e4/e6 column).
+- `tests/test_relax.py`: relax parser vs ASE's reader, relaxed structure = elastic reference,
+  crashed run (data tests).
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
   reference rows × (I + ε) with fixed fractional coordinates), and so do `140` and `150`.
@@ -199,8 +222,9 @@ Turn these into pytest tests before refactoring the parser.
    as metadata; check for systematic C_ij differences between schemes.
 3. **Narrow configuration coverage**: within an alloy, energies span 0.6–4.8 meV/atom
    (median 1.8) and max |F| is 0.04–0.30 eV/Å (median 0.08). A potential trained only on this may fail to relax a fresh SQS from
-   ideal positions. Plan to add the vc-relax trajectories (ask the user for them) and
-   ±3–5% volume scans.
+   ideal positions. **The vc-relax runs fix much of this** (ideal → relaxed: energy drop median
+   78 meV/atom, max 274; initial max |F| median 1.1, max 2.0 eV/Å; pressure −20…+28 GPa; volume
+   −12…+18 %; displacements up to 1.4 Å). ±3–5 % volume scans would still help.
 4. **Ionic steps are near-duplicates** (~10 per work): weight per work, not per frame,
    and never treat them as independent samples in validation.
 5. **Near-core rho/ELF are pseudopotential artefacts** (r ≲ 0.8 Å): Ta peaks at
@@ -216,8 +240,22 @@ Turn these into pytest tests before refactoring the parser.
 7. **Residual stress**: the zero-strain intercept exceeds 0.5 GPa in 18 alloys (max 0.91, `118`),
    i.e. the reference cell is not exactly at zero stress; their C_ij labels refer to that cell.
    Phase 3 must decide whether to strain the DFT cell or the potential's own relaxed cell.
+   **Cause (from the relax runs):** each reference cell was relaxed with different settings than
+   its elastic run. Mean residual pressure by (relax → elastic) settings: 55/550 G0.009 → same
+   +0.23 GPa (Pulay-like offset of a fresh basis), 55/550 G0.007 → G0.009 +0.08, 60/500 G0.007
+   → 55/550 G0.009 −0.16, 60/500 G0.007 → MV −0.32 GPa. A systematic offset, not a data error.
 8. **Large non-cubic part (> 8%) in 17 alloys, all Ti-rich (Ti ≥ 31%)**, up to 20% (`88`
    Ta4Ti28): physical (soft bcc Ti), raises the C_ij error floor for those alloys.
+
+9. **Relaxations vs elastic reference cells** (`data/processed/relax_qc.csv`): in 193 of 202
+   vc-relax runs the relaxed structure *is* the elastic reference (positions 5e-7 Å, cell
+   3e-6 Å, same species order everywhere). Exceptions: `91 170 173 174 195 200` (stopped at
+   100 steps) and `179` (crashed) differ by 1–24 mÅ (relaxation finished elsewhere);
+   **`87` (Nb4Ti28) and `88` (Ta4Ti28) differ completely** (positions 5 Å, cell 0.44–0.48 Å):
+   their relaxations left bcc while the elastic runs used another cell — ask the user.
+10. **DFT label precision**: 8 alloys have complete elastic runs at two settings (60/550 G0.007
+   vs 55/550 G0.009 or MV). |ΔC11| mean 3.9 GPa (max 11.6, `100`), |ΔC12| 1.5 (max 3.3),
+   |ΔC44| 2.2 (max 4.8), |ΔC′| 2.6 (max 7.5). A 5–10 GPa target is close to this floor.
 
 ## Phase 0 results (complete; `data/processed/qc.csv`)
 
@@ -328,6 +366,7 @@ Environment: Python ≥ 3.10, numpy, scipy, ase, torch, pytest
 - ~~How many alloys used each smearing scheme?~~ Answered in "DFT settings" (Phase 0).
 - ~~Where is the full output of the interrupted `150` run?~~ Unknown/lost (see Known data
   issue 1). Phase 0 will list any other restarted runs; decide then whether to recompute.
-- Are the vc-relax outputs (ideal → relaxed SQS) available as extra training data?
+- ~~Are the vc-relax outputs available?~~ Yes for 203 alloys (+12 earlier elastic runs); see
+  "Data". Open: which cell did the elastic runs of `87` and `88` use?
 - Target accuracy for C_ij (provisional: MAE ≤ 5–10 GPa vs DFT)?
 - Is LAMMPS export required, or is an ASE/PyTorch calculator enough?
