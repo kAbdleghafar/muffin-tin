@@ -15,15 +15,36 @@ class Splines(torch.nn.Module):
     cutoff=True: f, f', f'' vanish at x1 (the 3 B-splines that are non-zero at x1 are dropped)
                  and f = 0 beyond; below x0, f continues linearly (value and slope at x0).
     cutoff=False: all n_intervals + 3 B-splines; linear continuation outside [x0, x1].
+    monotone=True: coefficients are tail sums of softplus increments, so every function is
+                 >= 0 and non-increasing (with cutoff=True); the parameter is `raw`.
     Coefficients have shape (n, size); evaluate with f(x, which) for function index `which`."""
 
-    def __init__(self, n, x0, x1, n_intervals, cutoff=True, init=None):
+    def __init__(self, n, x0, x1, n_intervals, cutoff=True, init=None, monotone=False):
         super().__init__()
         self.x0, self.x1, self.m, self.cutoff = float(x0), float(x1), int(n_intervals), cutoff
         self.h = (self.x1 - self.x0) / self.m
         self.size = self.m if cutoff else self.m + 3
-        c = torch.zeros(n, self.size, dtype=torch.float64) if init is None else init.clone()
-        self.coef = torch.nn.Parameter(c)
+        self.monotone = monotone
+        self.raw = torch.nn.Parameter(torch.zeros(n, self.size, dtype=torch.float64))
+        if init is not None:
+            self.set_coef(init)
+
+    @property
+    def coef(self):
+        if not self.monotone:
+            return self.raw
+        inc = torch.nn.functional.softplus(self.raw)
+        return torch.flip(torch.cumsum(torch.flip(inc, [1]), 1), [1])
+
+    def set_coef(self, c):
+        """Set the effective coefficients (inverting the monotone transform if needed)."""
+        with torch.no_grad():
+            c = torch.as_tensor(c, dtype=torch.float64)
+            if self.monotone:
+                inc = (c - torch.cat([c[:, 1:], c.new_zeros(c.shape[0], 1)], 1)).clamp(min=1e-10)
+                self.raw.copy_(inc + torch.log(-torch.expm1(-inc)))     # softplus^-1
+            else:
+                self.raw.copy_(c)
 
     def _full(self):
         if self.cutoff:

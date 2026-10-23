@@ -19,11 +19,11 @@ for _k, (_a, _b) in enumerate(PAIRS):
 
 class EAM(torch.nn.Module):
     def __init__(self, rc=6.0, r0_pair=1.8, r0_dens=1.8, n_pair=21, n_dens=21,
-                 rho_max=3.0, n_embed=8):
+                 rho_max=3.0, n_embed=8, monotone_density=True):
         super().__init__()
         self.rc = float(rc)
         self.phi = Splines(len(PAIRS), r0_pair, rc, n_pair, cutoff=True)
-        self.f = Splines(NS, r0_dens, rc, n_dens, cutoff=True)
+        self.f = Splines(NS, r0_dens, rc, n_dens, cutoff=True, monotone=monotone_density)
         self.F = Splines(NS, 0.0, rho_max, n_embed, cutoff=False)
         self.e0 = torch.nn.Parameter(torch.zeros(NS, dtype=torch.float64))
 

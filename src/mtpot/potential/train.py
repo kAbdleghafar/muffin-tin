@@ -59,12 +59,12 @@ def init_model(model):
     phi ~ weak Morse; e0 = 0 (energies are referenced to mu)."""
     with torch.no_grad():
         r = model.f.x0 + model.f.h * (torch.arange(model.f.size, dtype=torch.float64) - 1)
-        model.f.coef.copy_(0.07 * torch.exp(-(r - 2.8) / 0.8)[None].repeat(len(SPECIES), 1))
+        model.f.set_coef(0.07 * torch.exp(-(r - 2.8) / 0.8)[None].repeat(len(SPECIES), 1))
         rp = model.phi.x0 + model.phi.h * (torch.arange(model.phi.size, dtype=torch.float64) - 1)
         morse = 0.2 * (torch.exp(-2 * 1.5 * (rp - 2.9)) - 2 * torch.exp(-1.5 * (rp - 2.9)))
-        model.phi.coef.copy_(morse[None].repeat(model.phi.coef.shape[0], 1))
+        model.phi.set_coef(morse[None].repeat(model.phi.coef.shape[0], 1))
         x = model.F.x0 + model.F.h * (torch.arange(model.F.size, dtype=torch.float64) - 1)
-        model.F.coef.copy_(-2.0 * torch.sqrt(x.clamp(min=0))[None].repeat(len(SPECIES), 1))
+        model.F.set_coef(-2.0 * torch.sqrt(x.clamp(min=0))[None].repeat(len(SPECIES), 1))
     return model
 
 
@@ -132,13 +132,48 @@ def fit(model, train, val, weights, epochs=50, lr=1e-2, batch_alloys=4, reg=1e-4
             L = L + reg * model.regularization()
             L.backward()
             opt.step()
-            tot += float(L)
+            tot += L.item()
         sched.step()
         row = dict(epoch=ep, loss=tot / int(np.ceil(len(order) / batch_alloys)),
                    seconds=time.time() - t0)
         if ep % eval_every == 0 or ep == epochs:
             row.update({f"train_{k}": v for k, v in summarize(model, train).items()})
             row.update({f"val_{k}": v for k, v in summarize(model, val).items()})
+        hist.append(row)
+        if log:
+            print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()}),
+                  file=log, flush=True)
+    return hist
+
+
+def fit_lbfgs(model, train, val, weights, iters=100, reg=1e-4, log=None, eval_every=10,
+              history_size=30):
+    """Full-batch L-BFGS (strong Wolfe line search). Gradients are accumulated alloy by alloy,
+    so memory stays at one alloy's graph. Logs every eval_every iterations."""
+    opt = torch.optim.LBFGS(model.parameters(), lr=1.0, max_iter=eval_every,
+                            history_size=history_size, line_search_fn="strong_wolfe",
+                            tolerance_grad=1e-12, tolerance_change=1e-14)
+    n_eval = [0]
+
+    def closure():
+        opt.zero_grad()
+        total = 0.0
+        for ab in train:
+            L = loss_of(evaluate(model, ab, create_graph=True), ab, weights) / len(train)
+            L.backward()
+            total += L.item()
+        R = reg * model.regularization()
+        R.backward()
+        n_eval[0] += 1
+        return torch.tensor(total + R.item())
+
+    hist = []
+    for it in range(eval_every, iters + 1, eval_every):
+        t0 = time.time()
+        loss = float(opt.step(closure))
+        row = dict(iteration=it, evaluations=n_eval[0], loss=loss, seconds=time.time() - t0)
+        row.update({f"train_{k}": v for k, v in summarize(model, train).items()})
+        row.update({f"val_{k}": v for k, v in summarize(model, val).items()})
         hist.append(row)
         if log:
             print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()}),
