@@ -18,12 +18,12 @@ def toy_model(seed=0):
     with torch.no_grad():
         r = m.f.x0 + m.f.h * (torch.arange(m.f.size, dtype=torch.float64) - 1)
         amp = 1 + 0.3 * torch.rand(len(SPECIES), 1, generator=g, dtype=torch.float64)
-        m.f.coef.copy_(amp * torch.exp(-(r - 2.0) / 0.8)[None] * 0.3)
+        m.f.set_coef(amp * torch.exp(-(r - 2.0) / 0.8)[None] * 0.3)
         rp = m.phi.x0 + m.phi.h * (torch.arange(m.phi.size, dtype=torch.float64) - 1)
         morse = lambda D, a, re: D * (torch.exp(-2 * a * (rp - re)) - 2 * torch.exp(-a * (rp - re)))
-        m.phi.coef.copy_(torch.stack([morse(0.3 + 0.1 * k / 21, 1.4, 2.9) for k in range(21)]))
+        m.phi.set_coef(torch.stack([morse(0.3 + 0.1 * k / 21, 1.4, 2.9) for k in range(21)]))
         x = m.F.x0 + m.F.h * (torch.arange(m.F.size, dtype=torch.float64) - 1)
-        m.F.coef.copy_(-torch.sqrt(x.clamp(min=0))[None].repeat(len(SPECIES), 1)
+        m.F.set_coef(-torch.sqrt(x.clamp(min=0))[None].repeat(len(SPECIES), 1)
                        * (1 + 0.2 * torch.rand(len(SPECIES), 1, generator=g, dtype=torch.float64)))
         m.e0.copy_(torch.randn(len(SPECIES), generator=g, dtype=torch.float64))
     return m
@@ -49,6 +49,19 @@ def test_splines_cutoff_and_extrapolation():
     h = 1e-6                                                             # continuous at x0
     lo, hi = s(torch.tensor([1.0 - h, 1.0 + h], dtype=torch.float64), w[:2])
     assert abs((lo - hi).item()) < 1e-5
+
+
+def test_monotone_splines_are_positive_and_non_increasing():
+    s = Splines(3, 1.8, 6.0, 12, monotone=True)
+    with torch.no_grad():
+        s.raw.normal_()
+    x = torch.linspace(1.0, 6.5, 400, dtype=torch.float64)
+    for k in range(3):
+        y = s(x, torch.full_like(x, k, dtype=torch.long))
+        assert torch.all(y >= -1e-12) and torch.all(torch.diff(y) <= 1e-12)
+    c = torch.linspace(1.0, 0.1, 12, dtype=torch.float64)[None].repeat(3, 1)
+    s.set_coef(c)
+    assert torch.allclose(s.coef, c)
 
 
 def test_forces_and_stress_match_finite_differences():
