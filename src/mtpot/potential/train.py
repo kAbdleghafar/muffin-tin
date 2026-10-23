@@ -173,9 +173,10 @@ def fit(model, train, val, weights, epochs=50, lr=1e-2, batch_alloys=4, reg=1e-4
 
 
 def fit_lbfgs(model, train, val, weights, iters=100, reg=1e-4, log=None, eval_every=10,
-              history_size=30):
+              history_size=30, checkpoint=None):
     """Full-batch L-BFGS (strong Wolfe line search). Gradients are accumulated alloy by alloy,
-    so memory stays at one alloy's graph. Logs every eval_every iterations."""
+    so memory stays at one alloy's graph. Logs (and calls checkpoint(model, row)) every
+    eval_every iterations."""
     opt = torch.optim.LBFGS(model.parameters(), lr=1.0, max_iter=eval_every,
                             history_size=history_size, line_search_fn="strong_wolfe",
                             tolerance_grad=1e-12, tolerance_change=1e-14)
@@ -203,6 +204,8 @@ def fit_lbfgs(model, train, val, weights, iters=100, reg=1e-4, log=None, eval_ev
         if log:
             print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()}),
                   file=log, flush=True)
+        if checkpoint:
+            checkpoint(model, row)
     return hist
 
 
