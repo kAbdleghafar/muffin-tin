@@ -5,7 +5,8 @@ from ase.io import read
 
 from conftest import raw_file
 from mtpot.io.pwscf import parse_pw_relax
-from qc_relax import deviation, tpw_reference
+from mtpot.io.thermo_pw import tpw_reference
+from qc_relax import deviation
 
 pytestmark = pytest.mark.data
 

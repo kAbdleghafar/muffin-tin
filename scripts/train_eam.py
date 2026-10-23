@@ -34,6 +34,8 @@ def main(argv=None):
                     help="loss weights (rE/rF/rS: relax sets)")
     ap.add_argument("--relax", action="store_true",
                     help="add vc-relax trajectories of the training alloys (val: report only)")
+    ap.add_argument("--exclude-relax", nargs="*", default=[],
+                    help="alloys whose relax runs are left out (e.g. 87 88)")
     ap.add_argument("--max-train", type=int, help="random subset of training alloys")
     ap.add_argument("--rc", type=float, default=6.0)
     ap.add_argument("--n-pair", type=int, default=21)
@@ -62,7 +64,8 @@ def main(argv=None):
     sets = {"train": [AlloyBatch(d, mu) for d in raw_train],
             "val": [AlloyBatch(d, mu) for d in raw_val]}
     if args.relax:
-        sets["train_relax"] = [AlloyBatch(d, mu) for d in read_relax(train_ids)]
+        sets["train_relax"] = [AlloyBatch(d, mu) for d in
+                               read_relax([a for a in train_ids if a not in args.exclude_relax])]
         sets["val_relax"] = [AlloyBatch(d, mu) for d in read_relax(val_ids)]
     train = sets["train"] + sets.get("train_relax", [])
     del raw_train, raw_val
@@ -81,15 +84,21 @@ def main(argv=None):
     weights = {k: float(v) for k, v in (kv.split("=") for kv in args.w.split(","))}
     out = ROOT / "models"
     out.mkdir(exist_ok=True)
+    config = dict(model=mcfg, args={k: (str(v) if isinstance(v, Path) else v)
+                                    for k, v in vars(args).items()},
+                  train=train_ids, val=val_ids)
+
+    def checkpoint(model, row):              # survive interruptions: resume with --init
+        save(model, out / f"{args.tag}.pt", mu, dict(config, last=row))
+
     with open(out / f"{args.tag}.log", "w") as log:
         if args.optimizer == "lbfgs":
             hist = fit_lbfgs(model, train, sets, weights, iters=args.epochs, reg=args.reg,
-                             log=log, eval_every=args.eval_every)
+                             log=log, eval_every=args.eval_every, checkpoint=checkpoint)
         else:
             hist = fit(model, train, sets, weights, epochs=args.epochs, lr=args.lr,
                        batch_alloys=args.batch_alloys, reg=args.reg, log=log,
                        eval_every=args.eval_every)
-    config = dict(model=mcfg, args=vars(args), train=train_ids, val=val_ids)
     save(model, out / f"{args.tag}.pt", mu, config)
     final = dict(report(model, sets), epochs=args.epochs,
                  seconds=sum(h["seconds"] for h in hist))
