@@ -312,7 +312,7 @@ Turn these into pytest tests before refactoring the parser.
   r < 2.3 Å or as per-atom shell-density targets); EAM baseline plus one angular channel
   as an ablation.
 
-## Phase 2 status (EAM fits so far; nothing long has been run yet)
+## Phase 2 status (pure EAM: unstable at DFT structures; see below)
 
 - Data checks: DFT forces are consistent with energy changes between ionic steps
   (corr 1.000); C_ij from stress slopes at final frames = thermo_pw within 0.008 GPa.
@@ -330,9 +330,22 @@ Turn these into pytest tests before refactoring the parser.
 - **C_ij at DFT positions is not the target**: the binaries model had C_ij errors of ~20 GPa at
   DFT positions on alloy `01`, but its own relaxed-ion C′ is −80 GPa (DFT +42) and 5 of 24
   strained relaxations do not converge. Judge models with `elastic_eval.py`, not the training C.
-- Long run `eam_v1` (user-approved): 232 training alloys + 180 relax runs (87/88 excluded),
-  warm start from `bin300`, 500 L-BFGS iterations, ~40 s/iteration (~5.5 h), detached with
-  `nohup setsid`, checkpoint `models/eam_v1.pt` every 25 iterations (resume with `--init`).
+- Long run `eam_v1` (user-approved; 232 training alloys + 180 relax runs, 87/88 excluded, warm
+  start `bin300`, ~40 s/iteration) **stopped at iteration ~100**: held-out C_ij at DFT positions
+  65/38/28 GPa, but the Phase 3 workflow gave C11 = −220 GPa for `140`. At the DFT reference the
+  model's force-constant matrix has 15–41 negative eigenvalues (down to −15 eV/Å²); its own
+  ionic relaxation moves atoms ~1.1 Å and gains 0.9 eV/atom (mostly pair energy): bcc is a
+  saddle point of the fitted EAM.
+- `mtpot.potential.hessian` adds a stability penalty (eigenvalues below kmin) and relaxed-ion C
+  by implicit differentiation (= workflow within 0.5 %); `train_eam.py --hessian-train N
+  --hessian-val`. ~3 s per 40-atom alloy (1 thread), so only a subset gets it.
+- **Pure EAM cannot fit these data and stay stable.** The untrained model is ~stable (0–5
+  modes ≈ −0.05 eV/Å²); training makes it unstable. The best single-alloy EAM fit (`01`, C at
+  DFT positions within 2–6 GPa) has 36/96 negative modes (−5.8 eV/Å²); with the stability
+  penalty from the start, `01` still has 13 negative modes after 200 iterations and C11/C12/C44
+  128/68/21 vs DFT 197/113/30. Consistent with Phase 1's directional (l = 4, group-dependent)
+  residual: angular terms are needed. Proposed next: ADP (EAM + dipole/quadrupole terms;
+  LAMMPS `pair_style adp`, ASE's EAM calculator reads ADP files for validation).
 
 ## Roadmap
 
