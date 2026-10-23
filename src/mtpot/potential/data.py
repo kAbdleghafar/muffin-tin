@@ -43,6 +43,7 @@ def build_alloy(path, rc=6.0):
         ptr.append(ptr[-1] + len(i))
     final = np.array([f["meta"]["final"] for f in keep])
     C = info["C_tpw_kbar"]
+    ri, rj, rS = neighbor_list("ijS", ref, rc)                 # unstrained DFT reference cell
     return dict(
         alloy=info["alloy"], smearing=smearing, species=species,
         positions=np.array([f["pos"] for f in keep]), cells=np.array([f["cell"] for f in keep]),
@@ -56,7 +57,15 @@ def build_alloy(path, rc=6.0):
         weight=np.array(weight), works_ended=np.array(sorted(info["works_ended"])),
         C_GPa=(C / 10.0) if C is not None else np.full((6, 6), np.nan),
         nl_i=np.concatenate(nl_i), nl_j=np.concatenate(nl_j), nl_S=np.concatenate(nl_S),
-        nl_ptr=np.array(ptr, dtype=np.int64), rc=rc)
+        nl_ptr=np.array(ptr, dtype=np.int64), rc=rc,
+        ref_positions=ref.positions, ref_cell=ref.cell[:],
+        ref_i=ri.astype(np.int16), ref_j=rj.astype(np.int16), ref_S=rS.astype(np.int8))
+
+
+def reference_graph(d):
+    """Frame graph of the unstrained DFT reference structure (for Hessian terms)."""
+    return dict(positions=d["ref_positions"], cell=d["ref_cell"], species=d["species"].astype(np.int64),
+                i=d["ref_i"].astype(np.int64), j=d["ref_j"].astype(np.int64), S=d["ref_S"].astype(np.float64))
 
 
 def frame_graphs(d):

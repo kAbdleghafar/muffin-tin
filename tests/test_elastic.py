@@ -52,3 +52,33 @@ def test_predict_modes_run():
     r = predict(a, m, mode="relax_ions")
     assert r["cubic"].shape == (3,) and r["pre"]["converged"]
     assert np.allclose(r["cubic"], cubic(r["C"]))
+
+
+def test_hessian_relaxed_cij_matches_relaxation_workflow():
+    """Implicit-differentiation C (training term) = explicit relax-and-strain C (workflow)."""
+    from mtpot.elastic.workflow import relax_cell
+    from mtpot.potential.eam import frame_graph
+    from mtpot.potential.hessian import full_hessian, hessian_terms, stability_penalty
+    from mtpot.potential.eam import PAIR_INDEX, SPECIES
+    torch.set_num_threads(1)
+    m, a = toy_model(8), alloy(10, ("Ti", "Mo"))
+    with torch.no_grad():                    # short, strong Ti-Mo bond: real internal relaxation
+        r = m.phi.x0 + m.phi.h * (torch.arange(m.phi.size, dtype=torch.float64) - 1)
+        c = m.phi.coef.clone()
+        c[PAIR_INDEX[SPECIES.index("Ti"), SPECIES.index("Mo")]] = \
+            0.6 * (torch.exp(-2.8 * (r - 2.6)) - 2 * torch.exp(-1.4 * (r - 2.6)))
+        m.phi.set_coef(c)
+    a.calc = TorchCalculator(m)
+    ok, _ = relax_cell(a, fmax=1e-5, steps=3000)                  # zero forces and stress
+    assert ok
+    H, vol = full_hessian(m, frame_graph(a, m.rc))
+    eig, C_clamped, C_relaxed = hessian_terms(H, vol, len(a))
+    C0, _, _ = elastic_constants(a, a.calc, relax=False)
+    C1, _, _ = elastic_constants(a, a.calc, relax=True, fmax=1e-5)
+    Cs = lambda C: 0.5 * (C + C.T)
+    tol = 0.005 * np.abs(C0).max()           # finite strains (<= 0.75 %) vs exact derivatives
+    assert np.abs(Cs(C_clamped.numpy()) - Cs(C0)).max() < tol
+    assert np.abs(Cs(C_relaxed.numpy()) - Cs(C1)).max() < tol
+    assert np.abs(C_relaxed.numpy() - C_clamped.numpy()).max() > 20.0  # relaxation matters here
+    assert eig.min() > 0 and stability_penalty(eig, 0.0) == 0
+    assert stability_penalty(torch.tensor([-2.0, 3.0], dtype=torch.float64), 1.0) == pytest.approx(4.5)
