@@ -39,9 +39,13 @@ results (`.npz`).
 - ecutwfc 55 Ry, ecutrho 550 Ry, scf threshold 1e-8, BFGS ionic relaxation, fixed cell per strain
   (`nstep` = 20; BFGS criteria energy < 5e-6 Ry, force < 5e-4 Ry/bohr)
 - Valence (Zval): Ti 12, Zr 12, Nb 13, Mo 14, Hf 12, **Ta 27 (4f in valence)**
-- Smearing is **not consistent**: `01` Marzari–Vanderbilt 0.007 Ry; `140`, `150` Gaussian 0.009 Ry
+- Smearing is **not consistent** (Phase 0, all 255): Gaussian 0.009 Ry in 235 alloys;
+  Marzari–Vanderbilt 0.007 Ry in 13 (`01`–`08`, `92`, `93`, `104`–`106`); Gaussian 0.007 Ry
+  in 7 (`110`–`116`). The MV group is Ti-rich binaries/ternaries, so scheme and chemistry are
+  confounded: no clean test of a systematic C_ij shift between schemes from these data.
 - Supercells are bcc-based, aligned with cubic axes, slightly triclinic after relaxation:
-  2×2×4 (32 atoms), 2×2×5 (40), 3×3×2 (36); a ≈ 3.18–3.30 Å.
+  2×2×4 (32 atoms, 241 alloys), 2×2×5 (40, 9), 3×3×2 (36, 5); a ≈ 3.18–3.30 Å.
+  36 element sets; 2–6 elements per alloy (2: 23, 3: 101, 4: 101, 5: 25, 6: 5).
   thermo_pw finds point group C_1, so it computes all 21 C_ij.
 
 ### thermo_pw strain protocol (24 "works")
@@ -145,15 +149,17 @@ Turn these into pytest tests before refactoring the parser.
 
 ## Known data issues
 
-1. **`150` is incomplete in its output file**: works 1–22 came from restart files.
+1. **Restarted runs: 14 alloys miss 185 works in total** (`05` 1–10, `11` 1–16, `46` 1–19,
+   `60` 1–12, `76` 1–7, `96` 1–19, `114` 1–13, `123` 1–16, `133` 1–5, `141` 1–17, `150` 1–22,
+   `159` 1–12, `181` 1–8, `194` 1–9). `150` example: works 1–22 came from restart files.
    The earlier interrupted run's output is lost (the user does not know where it is), so
    for `150` only works 23–24 give frames; thermo_pw's C_ij is still usable as a label.
    Recovering works 1–22 would mean recomputing them. Detect and report restarted works
    for every alloy; never silently drop them.
 2. **Mixed smearing schemes** across alloys: always correct to E0 and store the scheme
    as metadata; check for systematic C_ij differences between schemes.
-3. **Narrow configuration coverage**: within an alloy, energies span only 1–1.6 meV/atom and
-   |F| ≲ 0.16 eV/Å (max 0.162 in `150`). A potential trained only on this may fail to relax a fresh SQS from
+3. **Narrow configuration coverage**: within an alloy, energies span 0.6–4.8 meV/atom
+   (median 1.8) and max |F| is 0.04–0.30 eV/Å (median 0.08). A potential trained only on this may fail to relax a fresh SQS from
    ideal positions. Plan to add the vc-relax trajectories (ask the user for them) and
    ±3–5% volume scans.
 4. **Ionic steps are near-duplicates** (~10 per work): weight per work, not per frame,
@@ -163,6 +169,28 @@ Turn these into pytest tests before refactoring the parser.
    region when fitting. About 16–17% of valence electrons lie > 1.2 Å from any nucleus;
    that is where the bonding signal is. Ti's near-core profile is identical in `01` and `150`
    (evidence that atom-centred functions transfer between alloys).
+
+6. **BFGS step limit**: 159 works in 56 alloys stopped at `nstep` = 20 before meeting the
+   criteria (e.g. `28` work 21: gradient 8.5e-4 vs 5e-4 Ry/bohr). thermo_pw used their last
+   stress for C_ij, so their last frame is `final` with `converged=False`. Frames are valid
+   DFT data; the labels contain slightly under-relaxed stresses.
+7. **Residual stress**: the zero-strain intercept exceeds 0.5 GPa in 18 alloys (max 0.91, `118`),
+   i.e. the reference cell is not exactly at zero stress; their C_ij labels refer to that cell.
+   Phase 3 must decide whether to strain the DFT cell or the potential's own relaxed cell.
+8. **Large non-cubic part (> 8%) in 17 alloys, all Ti-rich (Ti ≥ 31%)**, up to 20% (`88`
+   Ta4Ti28): physical (soft bcc Ti), raises the C_ij error floor for those alloys.
+
+## Phase 0 results (thermo_pw outputs, `data/processed/qc.csv`)
+
+- 255 alloys, no parse errors; 52,797 frames (51,233 in the 241 complete alloys).
+- Settings identical everywhere (PBEsol, 55/550 Ry); nelec = ΣZval for all.
+- Refit C_ij vs thermo_pw ≤ 0.011 GPa for all 241 complete alloys; strain protocol holds for
+  every work (strained cell vs reference × (I + ε) ≤ 7e-5 Å).
+- Range: C11 134–463, C12 86–178, C44 19–102 GPa (medians 191 / 117 / 38).
+- **Cauchy pressure C12 − C44 > 0 for all 255** and C′ ≥ 18 GPa: pure EAM is not ruled out by
+  the Cauchy-pressure sign; angular terms must be justified by Phase 1 or by fit quality.
+- Cube pass (rho electron count, ELF range, cube vs reference structure) not yet run on the
+  full set (samples `01`, `140`, `150` pass).
 
 ## Roadmap
 
@@ -218,7 +246,7 @@ Environment: Python ≥ 3.10, numpy, scipy, ase, torch, pytest
 
 ## Open questions for the user
 
-- How many of the 252 alloys used each smearing scheme?
+- ~~How many alloys used each smearing scheme?~~ Answered in "DFT settings" (Phase 0).
 - ~~Where is the full output of the interrupted `150` run?~~ Unknown/lost (see Known data
   issue 1). Phase 0 will list any other restarted runs; decide then whether to recompute.
 - Are the vc-relax outputs (ideal → relaxed SQS) available as extra training data?
