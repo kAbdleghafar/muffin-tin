@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from mtpot.density.basis import RadialBasis
+from mtpot.density.basis import ExpBasis, RadialBasis
 from mtpot.density.fit import SPECIES, DensityFit, metrics, sample_alloy
 from mtpot.density.grid import grid_positions, neighbour_pairs
 from mtpot.density.profiles import atom_pairs, radial_profiles, shell_power
@@ -95,9 +95,10 @@ def prepare_one(aid, n_points=20000, rc_max=6.5, force=False):
     return aid, "done"
 
 
-def load(aid):
+def load(aid, prefix=""):
+    """Cached arrays of one alloy (only keys starting with prefix: npz members load lazily)."""
     z = np.load(OUT / f"{aid}.npz", allow_pickle=False)
-    return {k: z[k] for k in z.files}
+    return {k: z[k] for k in z.files if k.startswith(prefix)}
 
 
 def sample_of(data):
@@ -116,23 +117,31 @@ def parse_r_core(text):
     return r
 
 
+def make_basis(kind, r0, rc, n):
+    return ExpBasis(r0, rc, n) if kind == "exp" else RadialBasis(r0, rc, n)
+
+
 def make_fit(samples, args, r_core):
-    fit = DensityFit(RadialBasis(args.r0, args.rc, args.n_int), r_core)
+    fit = DensityFit(make_basis(args.basis, args.r0, args.rc, args.n_int), r_core,
+                     background=args.background)
     for s in samples:
         fit.add(s)
-    return fit.solve(lam=args.lam, nonneg=not args.signed)
+    return fit.solve(lam=args.lam, nonneg=not args.signed, monotone=args.monotone)
 
 
 def save_fit(fit, path, extra):
     np.savez(path, coef=fit.coef, r0=fit.basis.r0, rc=fit.basis.rc, n_int=fit.basis.n,
+             basis=type(fit.basis).__name__, background=fit.background,
              species=np.array(SPECIES), r_core=np.array([fit.r_core[s] for s in SPECIES]),
              **extra)
 
 
 def load_fit(path):
     z = np.load(path)
-    fit = DensityFit(RadialBasis(float(z["r0"]), float(z["rc"]), int(z["n_int"])),
-                     dict(zip([str(s) for s in z["species"]], z["r_core"])))
+    kind = "exp" if str(z["basis"]) == "ExpBasis" else "spline"
+    fit = DensityFit(make_basis(kind, float(z["r0"]), float(z["rc"]), int(z["n_int"])),
+                     dict(zip([str(s) for s in z["species"]], z["r_core"])),
+                     background=bool(z["background"]))
     fit.coef = z["coef"]
     return fit
 
@@ -140,7 +149,7 @@ def load_fit(path):
 def cmd_fit(args):
     train, test = resolve(args.train), resolve(args.test or [])
     r_core = parse_r_core(args.r_core)
-    samples = {a: sample_of(load(a)) for a in train + test}
+    samples = {a: sample_of(load(a, "sample_")) for a in train + test}
     fit = make_fit([samples[a] for a in train], args, r_core)
     rows = []
     for split, ids in (("train", train), ("test", test)):
@@ -152,6 +161,9 @@ def cmd_fit(args):
                                                  samples[a])["rel_rmse"]
             rows.append(row)
     tag = args.tag
+    if fit.background:
+        print("background e/atom: " + "  ".join(f"{k} {v:.3f}" for k, v in
+                                                 fit.background_electrons().items()))
     save_fit(fit, OUT / f"fit_{tag}.npz", dict(train=np.array(train)))
     with open(OUT / f"fit_{tag}_metrics.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]) + (["oracle_rel_rmse"] if args.oracle and "oracle_rel_rmse" not in rows[0] else []))
@@ -224,6 +236,8 @@ def cmd_angular(args):
 def profile_stats(ids, radii=(0.3, 0.6, 0.8, 1.0, 1.2, 1.4, 1.8, 2.2)):
     """Per species and radius: mean rho/ELF, spread over atoms within an alloy and spread of
     the alloy means across alloys (transferability of atom-centred profiles)."""
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)   # empty innermost bins (r < voxel)
     curves = {s: [] for s in SPECIES}                  # (alloy, r, mean rho, mean elf, within std)
     for a in ids:
         z = np.load(OUT / f"{a}.npz")
@@ -281,7 +295,7 @@ def cmd_report(args):
             ax.axvline(fit.r_core[s], color=MUTED, lw=1, ls=(0, (3, 3)))
             ax.text(fit.r_core[s] + 0.04, 3.0, "core mask", color=MUTED, fontsize=7, va="top")
         ax.set_yscale("log")
-        ax.set_ylim(0.01, 4)
+        ax.set_ylim(0.01, 10)
         ax.set_title(f"{s}  ({len(curves[s])} alloys)", color=INK, fontsize=10, loc="left")
     for ax in axes[1]:
         ax.set_xlabel("distance from nucleus r (Å)", color=MUTED, fontsize=9)
@@ -317,6 +331,32 @@ def cmd_report(args):
         fig.tight_layout()
         fig.savefig(REPORT / f"f_Z_{args.tag}.png", dpi=150)
         plt.close(fig)
+    if args.compare:
+        fits = {t: load_fit(OUT / f"fit_{t}.npz") for t in args.compare}
+        colors = ["#2a78d6", "#eb6834", "#1baf7a"]
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3.8), sharey=True, facecolor="#fcfcfb")
+        r = np.linspace(1.0, 6.0, 500)
+        for ax, s in zip(axes, ["Ti", "Mo"]):
+            _style(ax)
+            for (t, f), c in zip(fits.items(), colors):
+                y = f.f(s, r) * 1e3
+                ax.plot(r, y, color=c, lw=2, label=t)
+                k = np.searchsorted(r, 1.6)
+                ax.annotate(t, (r[k], y[k]), xytext=(6, 0), textcoords="offset points",
+                            color=INK, fontsize=8)
+            for x in (2.8, 3.25, 4.6, 5.4):
+                ax.axvline(x, color=GRID, lw=1.2, zorder=0)
+            ax.axhline(0, color=MUTED, lw=0.8)
+            ax.set_ylim(-4, 20)
+            ax.set_title(s, color=INK, fontsize=10, loc="left")
+            ax.set_xlabel("r (Å); grey lines = bcc neighbour shells", color=MUTED, fontsize=9)
+        axes[0].set_ylabel("f_Z(r) (10⁻³ e/bohr³)", color=MUTED, fontsize=9)
+        axes[1].legend(frameon=False, fontsize=8, loc="upper right")
+        fig.suptitle("Fits of equal quality disagree at neighbour distances", color=INK,
+                     fontsize=11, x=0.01, ha="left")
+        fig.tight_layout()
+        fig.savefig(REPORT / "f_Z_compare.png", dpi=150)
+        plt.close(fig)
     print(f"-> {REPORT}")
 
 
@@ -333,9 +373,13 @@ def main(argv=None):
     f.add_argument("--r-core", default="", help="e.g. all=0.9,Ta=1.0 (Angstrom; default 0.8)")
     f.add_argument("--r0", type=float, default=0.6)
     f.add_argument("--rc", type=float, default=6.0)
-    f.add_argument("--n-int", type=int, default=27)
+    f.add_argument("--n-int", type=int, default=27, help="spline intervals / exp terms")
+    f.add_argument("--basis", choices=["spline", "exp"], default="spline")
+    f.add_argument("--background", action="store_true",
+                   help="add a uniform background sum_Z N_Z/V * beta_Z per alloy")
     f.add_argument("--lam", type=float, default=1e-4)
     f.add_argument("--signed", action="store_true", help="allow negative coefficients")
+    f.add_argument("--monotone", action="store_true", help="f_Z non-increasing and >= 0")
     f.add_argument("--oracle", action="store_true", help="also fit each test alloy alone")
     f.add_argument("--tag", default="binaries")
     g = sub.add_parser("angular")
@@ -344,6 +388,7 @@ def main(argv=None):
     h = sub.add_parser("report")
     h.add_argument("--ids", nargs="+", required=True)
     h.add_argument("--tag", default="binaries")
+    h.add_argument("--compare", nargs="*", help="fit tags to overlay for Ti and Mo")
     args = ap.parse_args(argv)
 
     if args.cmd == "prepare":
