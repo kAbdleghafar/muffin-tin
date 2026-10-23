@@ -21,6 +21,11 @@ fitting targets** — rho/ELF alone cannot determine the energy.
 | `rho_<id>.cube` | QE pp.x valence density (pseudo + augmentation), e/bohr³, unstrained reference cell |
 | `elf_<id>.cube` | QE pp.x ELF on the same grid and structure |
 
+Full data set: three Google Drive files from the user —
+`19ncdMpoeH1ACApIul9PHoFghg0jFWXKq`, `1iozSRV_pG14wqAj0kjVXkZhGpsZUUVc8`,
+`1c8yQFm7i_OejH3GtDaqPxJiSpvjyr_jH` (download:
+`https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t`; the cloud
+environment's network policy must allow `drive.google.com` and `drive.usercontent.google.com`).
 Samples examined so far: `01`, `140`, `150`. Raw files are 4–30 MB each (~13 GB of cubes
 in total): never load all cubes at once, process one alloy at a time and cache reduced
 results (`.npz`).
@@ -70,14 +75,14 @@ so predictions are comparable to the DFT labels.
   three off-diagonal normal terms of the symmetrised tensor, C44 = mean(C44, C55, C66).
 - Training energy: E0 = F − ½(−TS) for Gaussian smearing; E0 ≈ F for Marzari–Vanderbilt.
   Forces and stresses are used as printed (derivatives of F).
-- Alloy ID = numeric suffix of the filename (`elast_01.out` → `01`). The current parser
-  stores `alloy="elast_01"`; normalise to the numeric ID.
+- Alloy ID = numeric suffix of the filename (`elast_01.out` → `01`), as the parser stores it.
 
 ## Existing code
 
 `scripts/tpw_to_dataset.py` (working, validated):
 - `parse_thermo_pw(path)` → `(frames, info)`; frames carry energy, forces, stress, cell,
-  positions, strain, work index, ionic step, `final` flag and −TS.
+  positions, strain, work index, ionic step, `final` flag and −TS. `final` = last ionic step
+  of a work whose BFGS converged (`info["works_converged"]`); unconverged works have none.
 - Writes `dataset.extxyz` (ASE SinglePointCalculator; info keys: `alloy`, `work`,
   `ionic_step`, `final`, `strain_voigt`, `minus_TS`, `smearing`) and `elastic_summary.csv`.
 - `refit_cij()` re-derives C_ij from relaxed stresses as a check; `cubic_projection()`.
@@ -88,12 +93,26 @@ python scripts/tpw_to_dataset.py data/raw/elast_*.out \
 ```
 
 `src/mtpot/elastic/protocol.py`: `thermo_pw_strain(work)` = the 24-work strain table below.
+`src/mtpot/io/cube.py`: `read_cube`, `integrate` (electron count), `structure_deviation`.
+`src/mtpot/dft.py`: Zval table and expected settings.
+
+`scripts/qc.py` (Phase 0): one row per alloy → `data/processed/qc.csv`, with a `flags` column
+(settings, nelec vs ΣZval, restart/unconverged works, dropped frames, strain protocol,
+non-cubic > 8%, refit mismatch > 0.02 GPa, residual stress > 0.5 GPa, rho electron count,
+ELF range, cube grid/structure). Rows are cached in `data/processed/qc_cache/<id>.json`, so a
+sweep resumes; `--no-cubes` skips the cubes (~2 s/alloy instead of ~5 s). The refit and
+residual stress are only computed when all 24 works converged (a one-sided fit picks up
+curvature). Sample `01`: no flags.
+
+```bash
+python scripts/qc.py data/raw -o data/processed/qc.csv
+```
 
 Tests (`python -m pytest`; `-m "not data"` for the data-free subset):
 - `tests/test_parser_synthetic.py`: parser units, signs, final flags, C_ij refit and CLI round trip
-  on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`). Two strict
-  `xfail` tests mark known gaps: numeric alloy ID, and `final` set on a work whose BFGS never
-  converged (an interrupted run would feed an unrelaxed stress into the refit).
+  on synthetic thermo_pw outputs with known answers (`tests/synthetic_tpw.py`), including a
+  run killed mid-relaxation (its last work must not be `final`).
+- `tests/test_qc.py`: QC sweep, flags and cache on synthetic alloys and cubes.
 - `tests/test_samples.py`: the regression fixtures below; skip unless the files are in
   `data/raw/` or `$MTPOT_RAW`. Sample `01` passes all of them (incl. strained cell =
   reference rows × (I + ε) with fixed fractional coordinates); `140`, `150` not yet uploaded.

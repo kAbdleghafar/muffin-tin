@@ -50,13 +50,21 @@ def _settings(text):
     return s
 
 
+def alloy_id_from_path(path):
+    """Numeric suffix of the file name: elast_01.out -> '01' (file stem if there is none)."""
+    name = str(path).split("/")[-1]
+    m = re.search(r"(\d+)\.\w+$", name)
+    return m.group(1) if m else re.sub(r"\.\w+$", "", name)
+
+
 def parse_thermo_pw(path, alloy_id=None):
     """Return (frames, info). info holds settings, reference structure, C_ij."""
     with open(path, errors="replace") as fh:
         lines = fh.read().splitlines()
-    alloy_id = alloy_id or re.sub(r"\.out$", "", path.split("/")[-1])
+    alloy_id = alloy_id or alloy_id_from_path(path)
     info = {"alloy": alloy_id, "settings": _settings("\n".join(lines[:3000])),
-            "works_total": None, "works_computed": set(), "C_tpw_kbar": None}
+            "works_total": None, "works_computed": set(), "works_converged": set(),
+            "C_tpw_kbar": None}
 
     frames, alat, axes, symbols, cart = [], None, np.zeros((3, 3)), [], None
     strain, work, step, cur = None, None, 0, None
@@ -126,14 +134,17 @@ def parse_thermo_pw(path, alloy_id=None):
             s = np.array([[float(x) for x in lines[i + k].split()[:3]] for k in (1, 2, 3)])
             cur["S"] = -s * Ry / Bohr**3          # QE sign -> ASE sign
             i += 4; continue
+        elif "bfgs converged" in L and work is not None:
+            info["works_converged"].add(work)
         elif "Elastic constants C_ij (kbar)" in L:
             info["C_tpw_kbar"] = np.array([[float(x) for x in lines[i + 2 + k].split()[1:7]]
                                            for k in range(6)])
         i += 1
 
-    # mark the last ionic step of each strained geometry (relaxed configuration)
+    # mark the last ionic step of each strained geometry, if its relaxation converged
     for a, b in zip(frames, frames[1:] + [None]):
-        a["meta"]["final"] = b is None or b["meta"]["work"] != a["meta"]["work"]
+        last = b is None or b["meta"]["work"] != a["meta"]["work"]
+        a["meta"]["final"] = last and a["meta"]["work"] in info["works_converged"]
     info["reference"] = ref
     return frames, info
 
@@ -217,6 +228,13 @@ def main():
         if missing:
             print(f"   WARNING: works {missing} not in this file (read from restart); "
                   f"their energies/forces/stresses are missing")
+        unconverged = sorted(info["works_computed"] - info["works_converged"])
+        if unconverged:
+            print(f"   WARNING: works {unconverged} have no converged BFGS relaxation; "
+                  f"none of their frames is marked final")
+        if len(frames_ok) < len(frames):
+            print(f"   WARNING: {len(frames) - len(frames_ok)} frames dropped "
+                  f"(no forces or stress printed)")
         row = {"alloy": info["alloy"], "formula": info["reference"].get_chemical_formula(),
                "natoms": len(info["reference"]), "frames": len(frames_ok),
                "works_computed": len(info["works_computed"]),
