@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from mtpot.potential.data import reference_energies
 from mtpot.potential.eam import EAM
-from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, save, summarize
+from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, save, summarize
 from mtpot.splits import resolve
 
 
@@ -38,19 +38,20 @@ def main(argv=None):
     ap.add_argument("--n-embed", type=int, default=8)
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--init", type=Path, help="warm start from a saved model (.pt)")
     ap.add_argument("--tag", default="eam")
     args = ap.parse_args(argv)
     torch.set_num_threads(args.threads)
 
     data_dir = ROOT / "data" / "processed" / "train"
-    load = lambda ids: [dict(np.load(data_dir / f"{a}.npz")) for a in ids]
+    read = lambda ids: [dict(np.load(data_dir / f"{a}.npz")) for a in ids]
     train_ids, val_ids = resolve(args.train), resolve(args.val)
     if args.max_train and len(train_ids) > args.max_train:
         rng = np.random.default_rng(0)
         train_ids = sorted(rng.choice(train_ids, args.max_train, replace=False).tolist(), key=int)
     assert not set(train_ids) & set(val_ids), "train and validation alloys overlap"
     t0 = time.time()
-    raw_train, raw_val = load(train_ids), load(val_ids)
+    raw_train, raw_val = read(train_ids), read(val_ids)
     mu = reference_energies(raw_train)
     train = [AlloyBatch(d, mu) for d in raw_train]
     val = [AlloyBatch(d, mu) for d in raw_val]
@@ -59,7 +60,14 @@ def main(argv=None):
           f"mu (eV) = {np.round(mu, 3).tolist()}", flush=True)
 
     mcfg = dict(rc=args.rc, n_pair=args.n_pair, n_dens=args.n_dens, n_embed=args.n_embed)
-    model = init_model(EAM(**mcfg))
+    if args.init:
+        model, mu0, cfg0 = load(args.init)
+        mcfg = cfg0["model"]
+        with torch.no_grad():                   # keep absolute energies: shift e0 by mu change
+            model.e0 += torch.as_tensor(mu0 - mu)
+        print(f"warm start from {args.init}", flush=True)
+    else:
+        model = init_model(EAM(**mcfg))
     weights = {k: float(v) for k, v in (kv.split("=") for kv in args.w.split(","))}
     out = ROOT / "models"
     out.mkdir(exist_ok=True)
