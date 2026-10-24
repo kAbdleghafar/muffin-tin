@@ -124,3 +124,15 @@ def test_all_steps_build_and_curvature_term(built, tmp_path):
     for k in ("E_meV_atom", "F_eV_A", "S_GPa", "C11_MAE"):
         assert s_full[k] == pytest.approx(s_ends[k], rel=1e-9)
     assert {"dF_steps_rel", "curv_ratio_median", "curv_neg_frac"} <= set(s_full)
+
+
+def test_align_e0_removes_mean_energy_error(built):
+    from mtpot.potential.train import align_e0
+    _, d = built
+    ab = AlloyBatch(d, reference_energies([d]))
+    m = init_model(EAM(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
+    mean_err = lambda: float((ab.w * (m(ab.batch, forces=False, stress=False)["energy"] / ab.nat
+                                       - ab.e_target)).sum() / ab.w.sum())
+    assert abs(mean_err()) > 0.1
+    align_e0(m, [ab])
+    assert abs(mean_err()) < 1e-10

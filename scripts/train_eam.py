@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from mtpot.potential.data import limit_steps, reference_energies
 from mtpot.potential.eam import make_model
-from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, report, save
+from mtpot.potential.train import (AlloyBatch, align_e0, fit, fit_lbfgs, init_model, load,
+                                   report, save)
 from mtpot.splits import resolve
 
 
@@ -110,7 +111,7 @@ def main(argv=None):
             model.e0 += torch.as_tensor(mu0 - mu)
         print(f"warm start from {args.init}", flush=True)
     else:
-        model = init_model(make_model(mcfg))
+        model = align_e0(init_model(make_model(mcfg)), sets["train"])
     weights = {k: float(v) for k, v in (kv.split("=") for kv in args.w.split(","))}
     out = ROOT / "models"
     out.mkdir(exist_ok=True)

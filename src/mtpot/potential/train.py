@@ -104,6 +104,26 @@ def init_model(model):
     return model
 
 
+def align_e0(model, alloys):
+    """Shift the per-species constants e0 so that the mean energy error of each alloy's
+    elastic frames is removed in the least-squares sense (exact for a single composition).
+    Started with a large energy offset, the first L-BFGS steps push every function, not just
+    e0, along the energy gradient."""
+    X, r = [], []
+    with torch.no_grad():
+        for ab in alloys:
+            if ab.relax:
+                continue
+            e = model(ab.batch, forces=False, stress=False)["energy"] / ab.nat
+            r.append(float((ab.w * (e - ab.e_target)).sum() / ab.w.sum()))
+            X.append(np.bincount(ab.batch["species"][:ab.nat].numpy(), minlength=len(SPECIES)) / ab.nat)
+        if not X:
+            return model
+        delta = np.linalg.lstsq(np.array(X), np.array(r), rcond=None)[0]
+        model.e0 -= torch.as_tensor(delta)
+    return model
+
+
 def group_centred(x, groups, w):
     """x minus its w-weighted mean within each group."""
     n = int(groups.max()) + 1
