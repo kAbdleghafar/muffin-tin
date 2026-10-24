@@ -1,4 +1,4 @@
-"""Fitting the EAM to energies, forces, stresses and C_ij (from stresses at DFT frames)."""
+"""Fitting EAM/ADP models to energies, forces, stresses and C_ij (from stresses at DFT frames)."""
 import json
 import time
 from pathlib import Path
@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from .data import composition, frame_graphs, reference_energies, reference_graph
-from .eam import EAM, SPECIES, collate
+from .eam import SPECIES, collate, make_model
 from .hessian import full_hessian, hessian_terms, stability_penalty
 
 EV_A3_GPA = 160.21766208
@@ -64,9 +64,22 @@ def cubic(C):
                         torch.diagonal(Cs)[3:].mean()])
 
 
+def init_angular(model, amplitude=0.01):
+    """ADP start: small decaying u, w (a smooth shape). The energy is quadratic in u and w, so
+    u = w = 0 is a stationary point of every loss term; a small seed lets the fit leave it."""
+    with torch.no_grad():
+        r = model.u.x0 + model.u.h * (torch.arange(model.u.size, dtype=torch.float64) - 1)
+        shape = amplitude * torch.exp(-(r - 2.8) / 0.8)[None].repeat(model.u.coef.shape[0], 1)
+        model.u.set_coef(shape)
+        model.w.set_coef(0.1 * shape)
+    return model
+
+
 def init_model(model):
     """Physically shaped start: f ~ exp decay (rho ~ 1 in bcc), F ~ -sqrt(rho),
-    phi ~ weak Morse; e0 = 0 (energies are referenced to mu)."""
+    phi ~ weak Morse; e0 = 0 (energies are referenced to mu); ADP: small u, w."""
+    if hasattr(model, "u"):
+        init_angular(model)
     with torch.no_grad():
         r = model.f.x0 + model.f.h * (torch.arange(model.f.size, dtype=torch.float64) - 1)
         model.f.set_coef(0.07 * torch.exp(-(r - 2.8) / 0.8)[None].repeat(len(SPECIES), 1))
@@ -242,8 +255,17 @@ def save(model, path, mu, config):
     torch.save({"state": model.state_dict(), "mu": mu, "config": config}, path)
 
 
-def load(path):
+def load(path, kind=None):
+    """(model, mu, config) from a checkpoint. kind="adp" turns an EAM checkpoint into an ADP
+    with the same EAM functions and small seeded u, w (warm start)."""
     ck = torch.load(path, weights_only=False)
-    m = EAM(**ck["config"]["model"])
-    m.load_state_dict(ck["state"])
+    cfg = dict(ck["config"]["model"])
+    upgrade = kind is not None and kind != cfg.get("kind", "eam")
+    if upgrade:
+        assert kind == "adp", "only EAM -> ADP warm starts are supported"
+        cfg["kind"] = kind
+    m = make_model(cfg)
+    m.load_state_dict(ck["state"], strict=not upgrade)
+    if upgrade:
+        init_angular(m)
     return m, ck["mu"], ck["config"]

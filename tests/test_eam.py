@@ -1,20 +1,21 @@
-"""EAM model: autograd forces/stress vs finite differences, batching, setfl export vs ASE."""
+"""EAM/ADP models: autograd forces/stress vs finite differences, batching, export vs ASE."""
 import numpy as np
 import pytest
 import torch
 from ase.build import bulk
 from ase.calculators.eam import EAM as AseEAM
 
-from mtpot.potential.eam import EAM, SPECIES, collate, frame_graph
-from mtpot.potential.export import write_setfl
+from mtpot.potential.eam import ADP, EAM, PAIRS, SPECIES, collate, frame_graph, make_model
+from mtpot.potential.export import write_adp, write_setfl
 from mtpot.potential.splines import Splines
 
 
-def toy_model(seed=0):
+def toy_model(seed=0, kind="eam"):
     """A smooth, physically shaped random EAM (decaying f, repulsive-attractive phi,
-    concave F) so the tests exercise realistic magnitudes."""
+    concave F) so the tests exercise realistic magnitudes; kind="adp" adds random decaying
+    dipole and quadrupole functions u, w of either sign."""
     g = torch.Generator().manual_seed(seed)
-    m = EAM(rc=5.0, n_pair=16, n_dens=16, rho_max=3.0, n_embed=8)
+    m = make_model(dict(kind=kind, rc=5.0, n_pair=16, n_dens=16, rho_max=3.0, n_embed=8))
     with torch.no_grad():
         r = m.f.x0 + m.f.h * (torch.arange(m.f.size, dtype=torch.float64) - 1)
         amp = 1 + 0.3 * torch.rand(len(SPECIES), 1, generator=g, dtype=torch.float64)
@@ -26,6 +27,11 @@ def toy_model(seed=0):
         m.F.set_coef(-torch.sqrt(x.clamp(min=0))[None].repeat(len(SPECIES), 1)
                        * (1 + 0.2 * torch.rand(len(SPECIES), 1, generator=g, dtype=torch.float64)))
         m.e0.copy_(torch.randn(len(SPECIES), generator=g, dtype=torch.float64))
+        if kind == "adp":
+            ra = m.u.x0 + m.u.h * (torch.arange(m.u.size, dtype=torch.float64) - 1)
+            shape = torch.exp(-(ra - 2.5) / 0.7)[None]
+            m.u.set_coef(0.1 * torch.randn(len(PAIRS), 1, generator=g, dtype=torch.float64) * shape)
+            m.w.set_coef(0.03 * torch.randn(len(PAIRS), 1, generator=g, dtype=torch.float64) * shape)
     return m
 
 
@@ -64,8 +70,9 @@ def test_monotone_splines_are_positive_and_non_increasing():
     assert torch.allclose(s.coef, c)
 
 
-def test_forces_and_stress_match_finite_differences():
-    m, a = toy_model(1), alloy(1)
+@pytest.mark.parametrize("kind", ["eam", "adp"])
+def test_forces_and_stress_match_finite_differences(kind):
+    m, a = toy_model(1, kind), alloy(1)
     out = m(collate([frame_graph(a, m.rc)]))
     F, S = out["forces"].detach().numpy(), out["stress"].detach().numpy()[0]
     E = lambda at: m.energies(collate([frame_graph(at, m.rc)])).item()
@@ -106,6 +113,34 @@ def test_setfl_export_matches_ase_eam(tmp_path):
     path = write_setfl(m, tmp_path / "toy.eam.alloy", nr=10000, nrho=10000)
     a.calc = AseEAM(potential=str(path))
     out = m(collate([frame_graph(a, m.rc)]))
+    assert a.get_potential_energy() == pytest.approx(out["energy"].item(), abs=1e-5)
+    assert np.allclose(a.get_forces(), out["forces"].detach().numpy(), atol=1e-4)
+    assert np.allclose(a.get_stress(), out["stress"].detach().numpy()[0], atol=1e-6)
+
+
+def test_adp_reduces_to_eam_and_vanishes_in_perfect_bcc():
+    a = alloy(11)
+    eam, adp = toy_model(4), toy_model(4, "adp")
+    plain = ADP(**{k: v for k, v in adp.config().items() if k != "kind"})
+    plain.load_state_dict(eam.state_dict(), strict=False)            # u = w = 0
+    g = collate([frame_graph(a, eam.rc)])
+    assert torch.allclose(plain.energies(g), eam.energies(g))
+    assert adp.energies(g) > eam.energies(g)                            # angular terms are >= 0
+    b = bulk("Nb", "bcc", a=3.3, cubic=True).repeat((2, 2, 2))
+    gb = collate([frame_graph(b, eam.rc)])
+    assert torch.allclose(adp.energies(gb), eam.energies(gb), atol=1e-10)
+    assert make_model(adp.config()).config() == adp.config()
+    assert isinstance(make_model({"rc": 5.0}), EAM) and not isinstance(make_model({"rc": 5.0}), ADP)
+
+
+def test_adp_export_matches_ase(tmp_path):
+    m, a = toy_model(5, "adp"), alloy(12)
+    path = write_adp(m, tmp_path / "toy.adp", nr=10000, nrho=10000)
+    a.calc = AseEAM(potential=str(path))
+    assert a.calc.form == "adp"
+    out = m(collate([frame_graph(a, m.rc)]))
+    E_eam = toy_model(5).energies(collate([frame_graph(a, m.rc)])).item()
+    assert abs(out["energy"].item() - E_eam) > 0.01                     # the test sees ADP terms
     assert a.get_potential_energy() == pytest.approx(out["energy"].item(), abs=1e-5)
     assert np.allclose(a.get_forces(), out["forces"].detach().numpy(), atol=1e-4)
     assert np.allclose(a.get_stress(), out["stress"].detach().numpy()[0], atol=1e-6)

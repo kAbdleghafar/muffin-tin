@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Fit the EAM (Phase 2) to energies, forces, stresses and C_ij of the training alloys and
-report errors on held-out alloys. Needs data/processed/train/<id>.npz (build_dataset.py).
+Fit the EAM or ADP (Phase 2) to energies, forces, stresses and C_ij of the training alloys
+and report errors on held-out alloys. Needs data/processed/train/<id>.npz (build_dataset.py).
 
 Usage:
     python scripts/train_eam.py --train rest --val test --epochs 30 --tag eam_v1
@@ -16,7 +16,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from mtpot.potential.data import reference_energies
-from mtpot.potential.eam import EAM
+from mtpot.potential.eam import make_model
 from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, report, save
 from mtpot.splits import resolve
 
@@ -42,6 +42,9 @@ def main(argv=None):
     ap.add_argument("--exclude-relax", nargs="*", default=[],
                     help="alloys whose relax runs are left out (e.g. 87 88)")
     ap.add_argument("--max-train", type=int, help="random subset of training alloys")
+    ap.add_argument("--model", choices=["eam", "adp"], default="eam",
+                    help="adp: EAM + dipole/quadrupole terms (an EAM --init is upgraded)")
+    ap.add_argument("--n-adp", type=int, default=15, help="ADP u, w spline intervals")
     ap.add_argument("--rc", type=float, default=6.0)
     ap.add_argument("--n-pair", type=int, default=21)
     ap.add_argument("--n-dens", type=int, default=21)
@@ -92,15 +95,18 @@ def main(argv=None):
     print(f"loaded {', '.join(f'{len(v)} {k}' for k, v in sets.items())} in "
           f"{time.time() - t0:.0f} s; mu (eV) = {np.round(mu, 3).tolist()}", flush=True)
 
-    mcfg = dict(rc=args.rc, n_pair=args.n_pair, n_dens=args.n_dens, n_embed=args.n_embed)
+    mcfg = dict(kind=args.model, rc=args.rc, n_pair=args.n_pair, n_dens=args.n_dens,
+                n_embed=args.n_embed)
+    if args.model == "adp":
+        mcfg["n_adp"] = args.n_adp
     if args.init:
-        model, mu0, cfg0 = load(args.init)
-        mcfg = cfg0["model"]
+        model, mu0, _ = load(args.init, kind=args.model)
+        mcfg = model.config()
         with torch.no_grad():                   # keep absolute energies: shift e0 by mu change
             model.e0 += torch.as_tensor(mu0 - mu)
         print(f"warm start from {args.init}", flush=True)
     else:
-        model = init_model(EAM(**mcfg))
+        model = init_model(make_model(mcfg))
     weights = {k: float(v) for k, v in (kv.split("=") for kv in args.w.split(","))}
     out = ROOT / "models"
     out.mkdir(exist_ok=True)

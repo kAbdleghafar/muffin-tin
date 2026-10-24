@@ -1,4 +1,4 @@
-"""Export an EAM model to the LAMMPS eam/alloy (setfl) format."""
+"""Export EAM models to the LAMMPS eam/alloy (setfl) format and ADP models to pair_style adp."""
 import numpy as np
 import torch
 from ase.data import atomic_masses, atomic_numbers
@@ -7,7 +7,7 @@ from .eam import PAIR_INDEX, SPECIES
 
 
 def write_setfl(model, path, species=SPECIES, nr=5000, nrho=5000, rho_max=None,
-                comment="mtpot EAM"):
+                comment="mtpot EAM", adp=False):
     """Tabulate F_Z(rho) (+ e0_Z, so absolute energies match), f_Z(r) and r*phi_ZZ'(r) on
     uniform grids. LAMMPS/ASE interpolate between points, so use dense grids."""
     rc = model.rc
@@ -27,8 +27,18 @@ def write_setfl(model, path, species=SPECIES, nr=5000, nrho=5000, rho_max=None,
             kk = torch.full((nrho,), k, dtype=torch.long)
             fh.write(fmt((model.F(rho, kk) + model.e0[k]).numpy()) + "\n")
             fh.write(fmt(model.f(r, torch.full((nr,), k, dtype=torch.long)).numpy()) + "\n")
-        for a, ka in enumerate(idx):
-            for b in range(a + 1):
-                p = PAIR_INDEX[ka, idx[b]].item()
-                fh.write(fmt((r * model.phi(r, torch.full((nr,), p, dtype=torch.long))).numpy()) + "\n")
+        pair_tables = lambda fn, scale: [
+            fmt((scale * fn(r, torch.full((nr,), PAIR_INDEX[ka, idx[b]].item(), dtype=torch.long))).numpy())
+            for a, ka in enumerate(idx) for b in range(a + 1)]
+        for t in pair_tables(model.phi, r):
+            fh.write(t + "\n")
+        if adp:                              # u(r), then w(r), tabulated directly (not times r)
+            for t in pair_tables(model.u, 1.0) + pair_tables(model.w, 1.0):
+                fh.write(t + "\n")
     return path
+
+
+def write_adp(model, path, species=SPECIES, nr=5000, nrho=5000, rho_max=None, comment="mtpot ADP"):
+    """LAMMPS pair_style adp file (the setfl tables, then u_ab(r) and w_ab(r) for the pairs in
+    the same order as phi). Use the .adp suffix: ASE's EAM calculator picks the form from it."""
+    return write_setfl(model, path, species, nr, nrho, rho_max, comment, adp=True)

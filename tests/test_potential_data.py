@@ -5,9 +5,9 @@ import torch
 from ase.units import Ry
 
 from mtpot.potential.data import build_alloy, reference_energies
-from mtpot.potential.eam import EAM
+from mtpot.potential.eam import ADP, EAM
 from mtpot.potential.train import (EV_A3_GPA, AlloyBatch, cij_from_stress, evaluate, init_model,
-                                   loss_of, summarize)
+                                   load, loss_of, save, summarize)
 from synthetic_tpw import DEFAULT_S0_KBAR, SyntheticRun, default_C_kbar
 
 
@@ -38,10 +38,11 @@ def test_cij_from_final_frame_stresses(built):
     assert torch.allclose(C, torch.as_tensor(run.C / 10), atol=0.03)     # GPa, print precision
 
 
-def test_training_step_reduces_loss(built):
+@pytest.mark.parametrize("cls", [EAM, ADP])
+def test_training_step_reduces_loss(built, cls):
     _, d = built
     ab = AlloyBatch(d, reference_energies([d]))
-    m = init_model(EAM(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
+    m = init_model(cls(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
     w = dict(E=1, F=1, S=1, C=1)
     opt = torch.optim.Adam(m.parameters(), lr=1e-2)
     losses = []
@@ -82,3 +83,17 @@ def test_hessian_terms_in_training(built):
     assert all(p.grad is not None for p in m.parameters())
     s = summarize(m, [ab])
     assert 0.0 <= s["stable_frac"] <= 1.0
+
+
+def test_eam_checkpoint_upgrades_to_adp(built, tmp_path):
+    _, d = built
+    mu = reference_energies([d])
+    eam = init_model(EAM(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
+    save(eam, tmp_path / "e.pt", mu, dict(model=eam.config()))
+    same, _, _ = load(tmp_path / "e.pt")
+    adp, mu1, _ = load(tmp_path / "e.pt", kind="adp")
+    assert type(same) is EAM and type(adp) is ADP and np.allclose(mu1, mu)
+    assert torch.equal(adp.phi.coef, eam.phi.coef) and adp.u.coef.abs().max() > 0
+    batch = AlloyBatch(d, mu).batch
+    dE = (adp.energies(batch) - eam.energies(batch)).detach()
+    assert torch.all(dE >= 0) and dE.max() / len(d["species"]) < 1e-3     # small seed: ~EAM

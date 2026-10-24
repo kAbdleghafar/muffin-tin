@@ -1,6 +1,7 @@
 """Multi-species EAM in torch:  E = sum_i [F_Zi(rho_i) + e_Zi] + 1/2 sum_{i!=j} phi_ZiZj(r_ij),
-rho_i = sum_{j!=i} f_Zj(r_ij).  Forces and stress (ASE convention, tension positive,
-stress = (1/V) dE/d(strain)) come from autograd through positions and a strain tensor."""
+rho_i = sum_{j!=i} f_Zj(r_ij); class ADP adds dipole and quadrupole terms. Forces and stress
+(ASE convention, tension positive, stress = (1/V) dE/d(strain)) come from autograd through
+positions and a strain tensor."""
 import numpy as np
 import torch
 from ase.neighborlist import neighbor_list
@@ -21,6 +22,8 @@ class EAM(torch.nn.Module):
     def __init__(self, rc=6.0, r0_pair=1.8, r0_dens=1.8, n_pair=21, n_dens=21,
                  rho_max=3.0, n_embed=8, monotone_density=True):
         super().__init__()
+        self._cfg = dict(rc=rc, r0_pair=r0_pair, r0_dens=r0_dens, n_pair=n_pair, n_dens=n_dens,
+                         rho_max=rho_max, n_embed=n_embed, monotone_density=monotone_density)
         self.rc = float(rc)
         self.phi = Splines(len(PAIRS), r0_pair, rc, n_pair, cutoff=True)
         self.f = Splines(NS, r0_dens, rc, n_dens, cutoff=True, monotone=monotone_density)
@@ -38,7 +41,7 @@ class EAM(torch.nn.Module):
             d = d + torch.einsum("pa,pab->pb", d, strain[batch["pair_frame"]])
         r = torch.linalg.norm(d, dim=1)
         rho = torch.zeros(len(Z), dtype=pos.dtype).index_add(0, i, self.f(r, Z[j]))
-        e_atom = self.F(rho, Z) + self.e0[Z]
+        e_atom = self.F(rho, Z) + self.e0[Z] + self.angular(d, r, Z, i, j)
         e_pair = 0.5 * self.phi(r, PAIR_INDEX[Z[i], Z[j]])
         n = batch["n_frames"]
         E = torch.zeros(n, dtype=pos.dtype).index_add(0, batch["atom_frame"], e_atom)
@@ -64,9 +67,57 @@ class EAM(torch.nn.Module):
                                              g[:, 1, 2], g[:, 0, 2], g[:, 0, 1]], dim=1)
         return out
 
+    def angular(self, d, r, Z, i, j):
+        """Per-atom angular energy (none in EAM)."""
+        return 0.0
+
     def regularization(self):
         return (self.phi.curvature_penalty() + self.f.curvature_penalty()
                 + self.F.curvature_penalty())
+
+    def config(self):
+        return dict(kind="eam", **self._cfg)
+
+
+class ADP(EAM):
+    """Angular-dependent potential (Mishin, Mehl & Papaconstantopoulos, Acta Mater. 53, 4029
+    (2005)): the EAM plus, per atom i,
+        1/2 |mu_i|^2 + 1/2 ||lambda_i||^2 - 1/6 nu_i^2 = 1/2 |mu_i|^2 + 1/2 ||dev lambda_i||^2,
+        mu_i = sum_j u_ZiZj(r_ij) r_ij,  lambda_i = sum_j w_ZiZj(r_ij) r_ij (x) r_ij,  nu_i = tr lambda_i
+    (r_ij = R_j - R_i, as LAMMPS pair_style adp and ASE). Both terms are >= 0 and vanish in a
+    centrosymmetric, cubic environment (perfect bcc): they penalise the loss of local symmetry
+    and break the Cauchy relation."""
+
+    def __init__(self, rc=6.0, r0_pair=1.8, r0_dens=1.8, n_pair=21, n_dens=21,
+                 rho_max=3.0, n_embed=8, monotone_density=True, r0_adp=1.8, n_adp=15):
+        super().__init__(rc, r0_pair, r0_dens, n_pair, n_dens, rho_max, n_embed, monotone_density)
+        self._cfg.update(r0_adp=r0_adp, n_adp=n_adp)
+        self.u = Splines(len(PAIRS), r0_adp, rc, n_adp, cutoff=True)
+        self.w = Splines(len(PAIRS), r0_adp, rc, n_adp, cutoff=True)
+
+    def angular(self, d, r, Z, i, j):
+        p = PAIR_INDEX[Z[i], Z[j]]
+        n = len(Z)
+        mu = torch.zeros(n, 3, dtype=d.dtype).index_add(0, i, self.u(r, p)[:, None] * d)
+        dd = d[:, :, None] * d[:, None, :]
+        lam = torch.zeros(n, 3, 3, dtype=d.dtype).index_add(0, i, self.w(r, p)[:, None, None] * dd)
+        nu = lam.diagonal(dim1=1, dim2=2).sum(-1)
+        return 0.5 * (mu ** 2).sum(1) + 0.5 * (lam ** 2).sum((1, 2)) - nu ** 2 / 6
+
+    def regularization(self):
+        return super().regularization() + self.u.curvature_penalty() + self.w.curvature_penalty()
+
+    def config(self):
+        return dict(kind="adp", **self._cfg)
+
+
+MODELS = {"eam": EAM, "adp": ADP}
+
+
+def make_model(cfg):
+    """Model from a config dict (`kind` = eam | adp; older configs without it are EAM)."""
+    cfg = dict(cfg)
+    return MODELS[cfg.pop("kind", "eam")](**cfg)
 
 
 # ---------------------------------------------------------------------- batching
