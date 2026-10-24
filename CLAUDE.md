@@ -160,13 +160,18 @@ python scripts/density_phase1.py report --ids binaries test --tag binaries
 
 `src/mtpot/potential/` (Phase 2): `splines` (torch cubic B-splines; cutoff, linear
 continuation, monotone option), `eam` (multi-species EAM, batched; forces and ASE-sign stress by
-autograd through positions and a strain tensor; `frame_graph`, `collate`), `export`
-(`write_setfl`, LAMMPS eam/alloy; matches ASE's EAM calculator), `data` (per-alloy training sets:
+autograd through positions and a strain tensor; `frame_graph`, `collate`; `ADP` = EAM +
+½|μᵢ|² + ½‖λᵢ‖² − νᵢ²/6 with dipole u and quadrupole w splines per pair, Mishin 2005;
+`make_model(cfg)` with `kind` eam/adp, configs without `kind` are EAM), `export`
+(`write_setfl`, LAMMPS eam/alloy; `write_adp`, LAMMPS adp, `.adp` suffix; both match ASE's EAM
+calculator), `data` (per-alloy training sets:
 first + final ionic step per work, E0, neighbour lists, reference energies μ_Z), `train`
 (losses on E/atom, F, S and C_ij from stress slopes at the 24 final frames; Adam and
-full-batch L-BFGS). `src/mtpot/splits.py`: shared alloy splits (`binaries`, `test`, `rest`,
-`all`). Scripts: `build_dataset.py` (→ `data/processed/train/<id>.npz`, ~6 min, 21 MB),
-`train_eam.py` (→ `models/<tag>.pt/.log/.json`; `--init` warm start). Torch: CPU wheel from
+full-batch L-BFGS; `load(path, kind="adp")` upgrades an EAM checkpoint, u and w seeded small
+because u = w = 0 is a stationary point of every loss term). `src/mtpot/splits.py`: shared
+alloy splits (`binaries`, `test`, `rest`, `all`), minus `EXCLUDED` (`87`, `88`).
+Scripts: `build_dataset.py` (→ `data/processed/train/<id>.npz`, ~6 min, 21 MB),
+`train_eam.py` (→ `models/<tag>.pt/.log/.json`; `--init` warm start; `--model adp`). Torch: CPU wheel from
 `https://download.pytorch.org/whl/cpu` (the PyPI wheel pulls GBs of CUDA libraries).
 
 Relax trajectories: `data.build_relax` → `data/processed/train_relax/<id>.npz` (202 runs,
@@ -277,6 +282,16 @@ Turn these into pytest tests before refactoring the parser.
 10. **DFT label precision**: 8 alloys have complete elastic runs at two settings (60/550 G0.007
    vs 55/550 G0.009 or MV). |ΔC11| mean 3.9 GPa (max 11.6, `100`), |ΔC12| 1.5 (max 3.3),
    |ΔC44| 2.2 (max 4.8), |ΔC′| 2.6 (max 7.5). A 5–10 GPa target is close to this floor.
+11. **Reference cells that left bcc** (deviatoric strain of the elastic reference cell vs the
+   ideal bcc supercell, `|dev ε|`): 217 alloys ≤ 3 %, but **all five group-IV-only alloys**
+   (no Nb/Mo/Ta: `04` Ti20Zr12, `07` Ti16Zr16, `110` Hf4Ti14Zr14, `114` Hf8Ti12Zr12,
+   `118` Hf12Ti10Zr10) have 12.4–13.9 % — cubic-cell edges e.g. 3.06/3.59/3.58 Å and a 94.5°
+   angle (`07`), a Burgers/α″-type distortion: bcc is mechanically unstable there and the
+   vc-relax went to another structure. Their DFT C tensors are positive definite (min
+   eigenvalue 27–36 GPa): the labels are for that structure, not bcc. Next tier, all with only
+   12.5 % Nb/Ta: `170` 9.5 %, `197` 8.3 %, `88` 6.9 %, `180` 5.9 %, `87` 5.8 %, `185` 5.3 %.
+   Only `88` has a negative DFT C eigenvalue (−7.1 GPa). `87` and `88` are excluded from all
+   splits (`splits.EXCLUDED`); the user mentioned a third unstable alloy (which one: open).
 
 ## Phase 0 results (complete; `data/processed/qc.csv`)
 

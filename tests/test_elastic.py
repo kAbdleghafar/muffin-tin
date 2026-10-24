@@ -54,14 +54,15 @@ def test_predict_modes_run():
     assert np.allclose(r["cubic"], cubic(r["C"]))
 
 
-def test_hessian_relaxed_cij_matches_relaxation_workflow():
+@pytest.mark.parametrize("kind", ["eam", "adp"])
+def test_hessian_relaxed_cij_matches_relaxation_workflow(kind):
     """Implicit-differentiation C (training term) = explicit relax-and-strain C (workflow)."""
     from mtpot.elastic.workflow import relax_cell
     from mtpot.potential.eam import frame_graph
     from mtpot.potential.hessian import full_hessian, hessian_terms, stability_penalty
     from mtpot.potential.eam import PAIR_INDEX, SPECIES
     torch.set_num_threads(1)
-    m, a = toy_model(8), alloy(10, ("Ti", "Mo"))
+    m, a = toy_model(8, kind), alloy(10, ("Ti", "Mo"))
     with torch.no_grad():                    # short, strong Ti-Mo bond: real internal relaxation
         r = m.phi.x0 + m.phi.h * (torch.arange(m.phi.size, dtype=torch.float64) - 1)
         c = m.phi.coef.clone()
