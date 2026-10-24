@@ -83,3 +83,17 @@ def test_hessian_relaxed_cij_matches_relaxation_workflow(kind):
     assert np.abs(C_relaxed.numpy() - C_clamped.numpy()).max() > 20.0  # relaxation matters here
     assert eig.min() > 0 and stability_penalty(eig, 0.0) == 0
     assert stability_penalty(torch.tensor([-2.0, 3.0], dtype=torch.float64), 1.0) == pytest.approx(4.5)
+
+
+def test_self_relaxation():
+    from mtpot.elastic.workflow import self_relaxation
+    torch.set_num_threads(1)
+    m = toy_model(9)
+    b = bulk("Mo", "bcc", a=3.15, cubic=True).repeat((2, 2, 2))
+    r = self_relaxation(b, TorchCalculator(m))                  # perfect bcc: already a minimum
+    assert r["disp_max_A"] < 1e-8 and abs(r["gain_meV_atom"]) < 1e-8 and r["converged"]
+    a = alloy(13, ("Ti", "Mo"))
+    p0 = a.positions.copy()
+    r = self_relaxation(a, TorchCalculator(m))
+    assert np.array_equal(a.positions, p0)                     # works on a copy
+    assert r["gain_meV_atom"] < 0 and r["disp_max_A"] > 0.01 and r["converged"]

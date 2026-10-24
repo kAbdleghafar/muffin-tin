@@ -195,6 +195,9 @@ model), `elastic_constants(reference, calc)` (24 thermo_pw strains, fractional c
 fixed, BFGS ionic relaxation at fixed cell, stress-strain slopes, zero-strain intercept),
 `predict(atoms, model, mode)`: `dft_cell` (strain the DFT reference cell, as the labels),
 `relax_ions`, `own` (relax cell + ions from the ideal SQS first: deployment).
+`self_relaxation` (relax a DFT minimum at fixed cell with the model: energy gain, displacements,
+shortest distance; `scripts/self_relax.py model.pt --ids test -j 4` → `models/<tag>_selfrelax.csv`,
+seconds per alloy — run it on every candidate model before the slower elastic workflow).
 `scripts/elastic_eval.py model.pt --ids test --mode dft_cell -j 4` → `models/<tag>_elastic_<mode>.csv`
 (1 torch thread per alloy; minutes per alloy when the model is near an instability).
 `src/mtpot/io/thermo_pw.py`: `tpw_reference` (reference cell from the head of an elast file).
@@ -364,6 +367,27 @@ Turn these into pytest tests before refactoring the parser.
   128/68/21 vs DFT 197/113/30. Consistent with Phase 1's directional (l = 4, group-dependent)
   residual: angular terms are needed. Proposed next: ADP (EAM + dipole/quadrupole terms;
   LAMMPS `pair_style adp`, ASE's EAM calculator reads ADP files for validation).
+
+### ADP and the stability diagnosis (single alloy `01`, Oct 2026)
+
+- ADP (warm start from the EAM fit `single01` + stability penalty, 200 it.): F 0.066 eV/Å,
+  C11/C12/C44 errors 2.5/4.6/6.7 GPa, 9 negative modes (lowest −0.97) — vs EAM + penalty
+  68/41/10 GPa, 13 modes (−1.5). ADP from scratch is worse than the warm start.
+- **Every single target destabilises**: E only, F only, S only, C only each give lowest
+  eigenvalue −7 … −31 eV/Å² (EAM). Aligning e0 first (`align_e0`) speeds the fit, does not fix it.
+- **Curvature data**: consecutive DFT ionic steps give dF ≈ −H du. `01`: 254 pairs, all
+  positive curvature (median 3.9 eV/Å²); |dF| per component ~0.003 eV/Å, a harmonic H explains
+  them to 4–20 %. Fitting only these (K) gives *stable* models (EAM lowest +1.15, ADP +0.61;
+  curvature ratio 0.98–0.99 on `01`, 1.0–1.15 on held-out `03`; dF error 36 % EAM, 30 % ADP).
+  K together with E/F/S/C stalls at dF error ~70 % and lowest eigenvalue −0.7 … −3.8.
+- **The decisive test is self-relaxation** (relax the DFT structure at fixed cell with the
+  model): the best ADP gains 526 meV/atom (mean displacement 0.71 Å), the best EAM 288; the
+  K-only ADP 30 meV/atom (0.15 Å). Local eigenvalues at the reference understate the failure.
+  The gain is all pair energy: the pair functions have wells/bumps (±0.1–0.3 eV) in the gaps
+  between bcc shells (3.3–4.5 Å), where the data put no neighbours, and the collapse moves atoms
+  into them (pair distances spread over 2.9–3.6 Å, CN(3.6 Å) 13.9 → 11.6). The data never
+  bring two atoms closer than 2.49 Å (most pairs ≥ 2.56 Å). Same ill-posedness as Phase 1's f_Z.
+  The default curvature penalty (`--reg 1e-4`) is negligible against the data terms.
 
 ## Roadmap
 

@@ -43,6 +43,24 @@ def relax_ions(atoms, fmax=1e-3, steps=500):
     return bool(ok), opt.nsteps
 
 
+def self_relaxation(atoms, calc, fmax=0.01, steps=1500):
+    """Relax a DFT minimum (e.g. the elastic reference) at fixed cell with the model: how far
+    does the model take it? A model whose minimum is near the DFT one moves atoms by << 0.1 A
+    and gains ~nothing; a spurious deeper minimum shows up as a large gain (meV/atom) and
+    displacement (A). Works on a copy."""
+    from ase.neighborlist import neighbor_list
+    a = atoms.copy()
+    a.calc = calc
+    e0 = a.get_potential_energy()
+    p0 = a.positions.copy()
+    ok, n = relax_ions(a, fmax=fmax, steps=steps)
+    d = np.linalg.norm(a.positions - p0, axis=1)
+    dmin = lambda x: float(neighbor_list("d", x, 4.0).min())
+    return dict(converged=ok, steps=n, gain_meV_atom=1e3 * (a.get_potential_energy() - e0) / len(a),
+                disp_max_A=float(d.max()), disp_mean_A=float(d.mean()),
+                dmin_ref_A=dmin(atoms), dmin_relaxed_A=dmin(a))
+
+
 def relax_cell(atoms, fmax=1e-3, steps=1000):
     """Cell + ionic relaxation to zero stress (in place)."""
     opt = BFGS(FrechetCellFilter(atoms), logfile=None)
