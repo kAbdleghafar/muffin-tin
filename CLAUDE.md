@@ -1,5 +1,22 @@
 # CLAUDE.md — Muffin-tin-like potential for refractory SQS alloys
 
+## Status: project terminated by the user (2026-10-24)
+
+Final state: no pair-functional potential (EAM, ADP) reproduced relaxed-ion C_ij; the best
+single-alloy ADP (`curv_adp01`) keeps the DFT structure but gives C′ −3 GPa for `01` (DFT 42).
+See "ADP and the stability diagnosis". A composition-only check run at the end (252 alloys,
+63/64/88 excluded; MAE in GPa for C11/C12/C44/C′):
+
+| model | random 10-fold | leave element set out |
+|---|---|---|
+| quadratic in VEC (3 parameters) | 6.2 / 6.6 / 4.4 / 3.3 | 6.7 / 7.0 / 4.5 / 3.4 |
+| Gaussian process on fractions + VEC | 3.1 / 1.7 / 2.8 / 2.1 | not finished |
+
+i.e. composition alone is already at the provisional 5–10 GPa target and near the DFT label
+precision (data issue 10). A potential only pays off for what composition cannot give
+(structure-specific, finite-temperature or defect properties). If revived, a fine-tuned
+pretrained ML potential with the existing Phase 3 workflow is the more promising route.
+
 ## Goal
 
 Build a physics-informed, muffin-tin / EAM-like interatomic potential for bcc refractory
