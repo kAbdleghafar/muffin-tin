@@ -35,6 +35,19 @@ class AlloyBatch:
         self.s_target = t(d["stress"] * EV_A3_GPA)                            # GPa
         self.w = t(d["weight"])
         self.w_atom = self.w.repeat_interleave(nat)
+        # consecutive ionic steps of a work: dF ~ -H du (curvature along the BFGS path)
+        self.steps = None
+        if not self.relax:
+            a = np.where((d["work"][1:] == d["work"][:-1]) & (d["step"][1:] == d["step"][:-1] + 1))[0]
+            if len(a):
+                cells = d["cells"][a]
+                du = d["positions"][a + 1] - d["positions"][a]
+                frac = np.einsum("fna,fab->fnb", du, np.linalg.inv(cells))
+                du = np.einsum("fna,fab->fnb", frac - np.round(frac), cells)
+                dF = d["forces"][a + 1] - d["forces"][a]
+                works, n_per = np.unique(d["work"][a], return_inverse=True, return_counts=True)[1:]
+                self.steps = dict(a=torch.as_tensor(a), du=t(du), dF=t(dF),
+                                  w=t(1.0 / n_per[works]))       # each work weighs 1
         # C_ij from stresses at the 24 final frames, if every relaxation ended
         self.cij = None
         if self.relax:
@@ -109,6 +122,10 @@ def evaluate(model, ab, create_graph=False, cij=True):
         dE = group_centred(dE, ab.groups, ab.w)
     res = dict(dE=dE, dF=out["forces"] - ab.f_target,
                dS=out["stress"] * EV_A3_GPA - ab.s_target)
+    if ab.steps is not None:
+        F = out["forces"].reshape(-1, ab.nat, 3)
+        a = ab.steps["a"]
+        res["dK"] = (F[a + 1] - F[a]) - ab.steps["dF"]
     if cij and ab.cij is not None:
         C = cij_from_stress(out["stress"] * EV_A3_GPA, ab.cij)
         res["C"] = C
@@ -123,7 +140,8 @@ def evaluate(model, ab, create_graph=False, cij=True):
 
 
 def loss_of(res, ab, w):
-    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa.
+    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa, and
+    0.01 eV/A for force differences between consecutive ionic steps (K, each work weighs 1).
     Relax sets use the weights rE, rF, rS (default: same as E, F, S)."""
     p = "r" if ab.relax else ""
     wE, wF, wS = (w.get(p + k, w[k]) for k in ("E", "F", "S"))
@@ -133,6 +151,9 @@ def loss_of(res, ab, w):
     if "dC" in res and w.get("C", 0) > 0:
         dC = 0.5 * (res["dC"] + res["dC"].T)
         L = L + w["C"] * ((dC / 5.0) ** 2).mean()
+    if "dK" in res and w.get("K", 0) > 0:
+        sw = ab.steps["w"]
+        L = L + w["K"] * (sw * ((res["dK"] / 0.01) ** 2).mean((1, 2))).sum() / sw.sum()
     if "eig" in res and w.get("H", 0) > 0:
         L = L + w["H"] * stability_penalty(res["eig"], w.get("kmin", 0.5))
     if "dC_rel" in res and w.get("R", 0) > 0 and res["eig"].min() > 0:   # only once stable
@@ -150,15 +171,23 @@ def report(model, sets):
 def summarize(model, alloys):
     """RMSEs over alloys (frame-weighted; relax energies within-group centred) and
     C11/C12/C44 errors from stress slopes."""
-    se_e = se_f = se_s = 0.0
-    n_e = n_f = n_s = 0.0
-    cub, rel, eig_min = [], [], []
+    se_e = se_f = se_s = se_k = 0.0
+    n_e = n_f = n_s = n_k = 0.0
+    cub, rel, eig_min, ratio = [], [], [], []
     with torch.enable_grad():
         for ab in alloys:
             res = {k: v.detach() for k, v in evaluate(model, ab).items()}
             se_e += float((ab.w * res["dE"] ** 2).sum()); n_e += float(ab.w.sum())
             se_f += float((ab.w_atom[:, None] * res["dF"] ** 2).sum()); n_f += 3 * float(ab.w_atom.sum())
             se_s += float((ab.w[:, None] * res["dS"] ** 2).sum()); n_s += 6 * float(ab.w.sum())
+            if "dK" in res:
+                sw = ab.steps["w"]
+                se_k += float((sw * (res["dK"] ** 2).mean((1, 2))).sum()); n_k += float(sw.sum())
+                du, dF = ab.steps["du"], ab.steps["dF"]
+                n2 = (du ** 2).sum((1, 2))
+                k_dft = -(dF * du).sum((1, 2)) / n2
+                k_mod = -((res["dK"] + dF) * du).sum((1, 2)) / n2
+                ratio.append((k_mod / k_dft).numpy())
             if "C" in res:
                 cub.append((cubic(res["C"]).numpy(), cubic(ab.cij[2]).numpy()))
             if "eig" in res:
@@ -167,6 +196,10 @@ def summarize(model, alloys):
                     rel.append((cubic(res["C_rel"]).numpy(), cubic(ab.C_dft).numpy(), eig_min[-1] > 0))
     out = dict(E_meV_atom=1e3 * np.sqrt(se_e / n_e), F_eV_A=np.sqrt(se_f / n_f),
                S_GPa=np.sqrt(se_s / n_s))
+    if n_k:                                     # force differences between ionic steps
+        r = np.concatenate(ratio)
+        out.update(dF_steps_eV_A=np.sqrt(se_k / n_k), curv_ratio_median=float(np.median(r)),
+                   curv_neg_frac=float(np.mean(r < 0)))
     if cub:
         p, t = np.array([c[0] for c in cub]), np.array([c[1] for c in cub])
         for k, name in enumerate(["C11", "C12", "C44"]):

@@ -97,3 +97,30 @@ def test_eam_checkpoint_upgrades_to_adp(built, tmp_path):
     batch = AlloyBatch(d, mu).batch
     dE = (adp.energies(batch) - eam.energies(batch)).detach()
     assert torch.all(dE >= 0) and dE.max() / len(d["species"]) < 1e-3     # small seed: ~EAM
+
+
+def test_all_steps_build_and_curvature_term(built, tmp_path):
+    run, d = built
+    from mtpot.potential.data import limit_steps
+    full = build_alloy(tmp_path / "elast_07.out", rc=5.0, all_steps=True)
+    n_steps = np.bincount(full["work"])[1:]
+    assert len(full["energy"]) == n_steps.sum() > len(d["energy"])
+    ends = limit_steps(full, 1)                              # first + last = the default build
+    for k in ("positions", "forces", "stress", "weight", "step", "nl_i", "nl_j", "nl_S", "nl_ptr"):
+        assert np.array_equal(ends[k], d[k]), k
+    inner = np.concatenate([[False] + [True] * (n - 2) + [False] for n in n_steps])
+    assert np.all(full["weight"][inner] == 0) and np.allclose(full["weight"][~inner], d["weight"])
+    mu = reference_energies([d])
+    ab = AlloyBatch(full, mu)
+    assert len(ab.steps["a"]) == (n_steps - 1).sum()
+    assert torch.allclose(ab.steps["w"].sum(), torch.tensor(24.0, dtype=torch.float64))
+    m = init_model(EAM(rc=5.0, n_pair=10, n_dens=10, n_embed=6))
+    res = evaluate(m, ab, create_graph=True)
+    assert res["dK"].shape == (len(ab.steps["a"]), ab.nat, 3)
+    w0 = dict(E=1, F=1, S=1, C=1)
+    assert loss_of(res, ab, dict(w0, K=1.0)) > loss_of(res, ab, w0)
+    # E, F, S errors are the same as with first + last steps only (inner steps weigh 0)
+    s_full, s_ends = summarize(m, [ab]), summarize(m, [AlloyBatch(d, mu)])
+    for k in ("E_meV_atom", "F_eV_A", "S_GPa", "C11_MAE"):
+        assert s_full[k] == pytest.approx(s_ends[k], rel=1e-9)
+    assert {"dF_steps_eV_A", "curv_ratio_median", "curv_neg_frac"} <= set(s_full)

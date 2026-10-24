@@ -2,7 +2,9 @@
 
 Ionic steps within a work are near-duplicates (CLAUDE.md, data issue 4), so each work keeps
 its first step (largest forces) and its final step (relaxed stress, used for C_ij), each
-weighted 1/2 (1 if the work has a single step). Energies are E0: F - (-TS)/2 for Gaussian
+weighted 1/2 (1 if the work has a single step). With all_steps=True the intermediate steps are
+kept too, with weight 0: they only enter through force differences between consecutive steps
+(dF ~ -H du, curvature along the BFGS path). Energies are E0: F - (-TS)/2 for Gaussian
 smearing, F for Marzari-Vanderbilt."""
 import numpy as np
 from ase import Atoms
@@ -20,7 +22,7 @@ def e0_energy(frame, smearing):
     return frame["E"] - 0.5 * mts if smearing.lower().startswith("gauss") else frame["E"]
 
 
-def build_alloy(path, rc=6.0):
+def build_alloy(path, rc=6.0, all_steps=False):
     """Arrays for one alloy: stacked frames (same atom count), labels, neighbour lists."""
     frames, info = parse_thermo_pw(str(path))
     smearing = (info["settings"]["smearing"] or "").split()[0]
@@ -30,9 +32,10 @@ def build_alloy(path, rc=6.0):
         by_work.setdefault(f["meta"]["work"], []).append(f)
     keep, weight = [], []
     for w, fs in sorted(by_work.items()):
-        sel = [fs[0]] + ([fs[-1]] if len(fs) > 1 else [])
+        ends = 1.0 / min(len(fs), 2)
+        sel = fs if all_steps else [fs[0]] + ([fs[-1]] if len(fs) > 1 else [])
         keep += sel
-        weight += [1.0 / len(sel)] * len(sel)
+        weight += [ends if k in (0, len(sel) - 1) else 0.0 for k in range(len(sel))]
     ref = info["reference"]
     species = np.array([SPECIES.index(s) for s in ref.get_chemical_symbols()], dtype=np.int8)
     nl_i, nl_j, nl_S, ptr = [], [], [], [0]
@@ -60,6 +63,34 @@ def build_alloy(path, rc=6.0):
         nl_ptr=np.array(ptr, dtype=np.int64), rc=rc,
         ref_positions=ref.positions, ref_cell=ref.cell[:],
         ref_i=ri.astype(np.int16), ref_j=rj.astype(np.int16), ref_S=rS.astype(np.int8))
+
+
+FRAME_KEYS = ("positions", "cells", "energy", "forces", "stress", "strain", "work", "step",
+              "final", "converged", "weight", "energy_group")
+
+
+def subset_frames(d, idx):
+    """Copy of a built alloy restricted to frames idx (neighbour lists sliced to match)."""
+    idx = np.asarray(idx)
+    out = {k: (v[idx] if k in FRAME_KEYS else v) for k, v in d.items()}
+    ptr = d["nl_ptr"]
+    parts = [np.arange(ptr[k], ptr[k + 1]) for k in idx]
+    sel = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
+    for k in ("nl_i", "nl_j", "nl_S"):
+        out[k] = d[k][sel]
+    out["nl_ptr"] = np.concatenate([[0], np.cumsum([len(q) for q in parts])]).astype(np.int64)
+    return out
+
+
+def limit_steps(d, k):
+    """Keep the first k ionic steps of each work plus its last (k = None: all)."""
+    if k is None:
+        return d
+    keep = []
+    for w in np.unique(d["work"]):
+        f = np.where(d["work"] == w)[0]
+        keep += sorted(set(f[:k].tolist()) | {int(f[-1])})
+    return subset_frames(d, keep)
 
 
 def reference_graph(d):

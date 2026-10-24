@@ -15,7 +15,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
-from mtpot.potential.data import reference_energies
+from mtpot.potential.data import limit_steps, reference_energies
 from mtpot.potential.eam import make_model
 from mtpot.potential.train import AlloyBatch, fit, fit_lbfgs, init_model, load, report, save
 from mtpot.splits import resolve
@@ -30,9 +30,10 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--batch-alloys", type=int, default=4)
     ap.add_argument("--reg", type=float, default=1e-4)
-    ap.add_argument("--w", default="E=1,F=1,S=1,C=1,rE=1,rF=1,rS=0.25,H=10,R=1,kmin=0.5",
-                    help="loss weights (rE/rF/rS: relax sets; H: stability, R: relaxed-ion C, "
-                         "kmin: minimum force-constant eigenvalue in eV/A^2)")
+    ap.add_argument("--w", default="E=1,F=1,S=1,C=1,K=1,rE=1,rF=1,rS=0.25,H=10,R=1,kmin=0.5",
+                    help="loss weights (rE/rF/rS: relax sets; K: force differences between ionic "
+                         "steps; H: stability, R: relaxed-ion C, kmin: minimum force-constant "
+                         "eigenvalue in eV/A^2)")
     ap.add_argument("--hessian-train", type=int, default=24,
                     help="training alloys with Hessian terms (stratified by element count)")
     ap.add_argument("--hessian-val", action="store_true",
@@ -41,6 +42,9 @@ def main(argv=None):
                     help="add vc-relax trajectories of the training alloys (val: report only)")
     ap.add_argument("--exclude-relax", nargs="*", default=[],
                     help="alloys whose relax runs are left out (e.g. 87 88)")
+    ap.add_argument("--all-steps", action="store_true",
+                    help="read data/processed/train_all (every ionic step; curvature term K)")
+    ap.add_argument("--steps", type=int, help="with --all-steps: first N steps + last per work")
     ap.add_argument("--max-train", type=int, help="random subset of training alloys")
     ap.add_argument("--model", choices=["eam", "adp"], default="eam",
                     help="adp: EAM + dipole/quadrupole terms (an EAM --init is upgraded)")
@@ -56,9 +60,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
     torch.set_num_threads(args.threads)
 
-    data_dir = ROOT / "data" / "processed" / "train"
+    data_dir = ROOT / "data" / "processed" / ("train_all" if args.all_steps else "train")
     relax_dir = ROOT / "data" / "processed" / "train_relax"
-    read = lambda ids: [dict(np.load(data_dir / f"{a}.npz")) for a in ids]
+    read = lambda ids: [limit_steps(dict(np.load(data_dir / f"{a}.npz")), args.steps) for a in ids]
     read_relax = lambda ids: [dict(np.load(relax_dir / f"{a}.npz")) for a in ids
                               if (relax_dir / f"{a}.npz").exists()]
     train_ids, val_ids = resolve(args.train), resolve(args.val)

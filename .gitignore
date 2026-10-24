@@ -13,3 +13,4 @@ data/processed/train/
 models/*
 !models/README.md
 data/processed/train_relax/
+data/processed/train_all/
