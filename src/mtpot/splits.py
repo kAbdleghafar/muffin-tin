@@ -7,10 +7,11 @@ import numpy as np
 
 QC_CSV = Path(__file__).resolve().parents[2] / "data" / "processed" / "qc.csv"
 
-# Alloys left out of every set (user decision, CLAUDE.md known data issue 9)
+# Alloys left out of every set (user decision: mechanically unstable; CLAUDE.md data issue 11)
 EXCLUDED = {
-    "87": "Nb4Ti28: relaxation left bcc; elastic run used another cell (mechanically unstable)",
-    "88": "Ta4Ti28: DFT C tensor has a negative eigenvalue (-7.1 GPa); relaxation left bcc",
+    "63": "Mo8Ta8Ti8Zr8: mechanically unstable (user)",
+    "64": "Nb8Ta8Ti8Zr8: mechanically unstable (user)",
+    "88": "Ta4Ti28: mechanically unstable (user); DFT C tensor has a negative eigenvalue (-7.1 GPa)",
 }
 
 

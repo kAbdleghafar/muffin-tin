@@ -169,7 +169,7 @@ first + final ionic step per work, E0, neighbour lists, reference energies μ_Z)
 (losses on E/atom, F, S and C_ij from stress slopes at the 24 final frames; Adam and
 full-batch L-BFGS; `load(path, kind="adp")` upgrades an EAM checkpoint, u and w seeded small
 because u = w = 0 is a stationary point of every loss term). `src/mtpot/splits.py`: shared
-alloy splits (`binaries`, `test`, `rest`, `all`), minus `EXCLUDED` (`87`, `88`).
+alloy splits (`binaries`, `test`, `rest`, `all`), minus `EXCLUDED` (`63`, `64`, `88`).
 Scripts: `build_dataset.py` (→ `data/processed/train/<id>.npz`, ~6 min, 21 MB),
 `train_eam.py` (→ `models/<tag>.pt/.log/.json`; `--init` warm start; `--model adp`). Torch: CPU wheel from
 `https://download.pytorch.org/whl/cpu` (the PyPI wheel pulls GBs of CUDA libraries).
@@ -290,8 +290,11 @@ Turn these into pytest tests before refactoring the parser.
    vc-relax went to another structure. Their DFT C tensors are positive definite (min
    eigenvalue 27–36 GPa): the labels are for that structure, not bcc. Next tier, all with only
    12.5 % Nb/Ta: `170` 9.5 %, `197` 8.3 %, `88` 6.9 %, `180` 5.9 %, `87` 5.8 %, `185` 5.3 %.
-   Only `88` has a negative DFT C eigenvalue (−7.1 GPa). `87` and `88` are excluded from all
-   splits (`splits.EXCLUDED`); the user mentioned a third unstable alloy (which one: open).
+   Only `88` has a negative DFT C eigenvalue (−7.1 GPa).
+   **Excluded from all splits (user decision, mechanically unstable): `63` Mo8Ta8Ti8Zr8,
+   `64` Nb8Ta8Ti8Zr8, `88` Ta4Ti28** (`splits.EXCLUDED`; none is in `test`, so `test` keeps 23
+   alloys). `63`/`64` look unremarkable in these QC numbers (|dev ε| 1.5/0.8 %, C positive
+   definite); `87` and the group-IV-only alloys stay in.
 
 ## Phase 0 results (complete; `data/processed/qc.csv`)
 
@@ -420,6 +423,7 @@ Environment: Python ≥ 3.10, numpy, scipy, ase, torch, pytest
 - ~~Where is the full output of the interrupted `150` run?~~ Unknown/lost (see Known data
   issue 1). Phase 0 will list any other restarted runs; decide then whether to recompute.
 - ~~Are the vc-relax outputs available?~~ Yes for 203 alloys (+12 earlier elastic runs); see
-  "Data". Open: which cell did the elastic runs of `87` and `88` use?
+  "Data". (`87`/`88` relax runs end off their elastic reference cells, data issue 9; `88` is
+  excluded, `87` stays in.)
 - Target accuracy for C_ij (provisional: MAE ≤ 5–10 GPa vs DFT)?
 - Is LAMMPS export required, or is an ASE/PyTorch calculator enough?

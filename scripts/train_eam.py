@@ -42,7 +42,7 @@ def main(argv=None):
     ap.add_argument("--relax", action="store_true",
                     help="add vc-relax trajectories of the training alloys (val: report only)")
     ap.add_argument("--exclude-relax", nargs="*", default=[],
-                    help="alloys whose relax runs are left out (e.g. 87 88)")
+                    help="alloys whose relax runs are left out (e.g. 87)")
     ap.add_argument("--all-steps", action="store_true",
                     help="read data/processed/train_all (every ionic step; curvature term K)")
     ap.add_argument("--steps", type=int, help="with --all-steps: first N steps + last per work")
