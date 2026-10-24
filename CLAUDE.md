@@ -383,11 +383,30 @@ Turn these into pytest tests before refactoring the parser.
 - **The decisive test is self-relaxation** (relax the DFT structure at fixed cell with the
   model): the best ADP gains 526 meV/atom (mean displacement 0.71 Å), the best EAM 288; the
   K-only ADP 30 meV/atom (0.15 Å). Local eigenvalues at the reference understate the failure.
-  The gain is all pair energy: the pair functions have wells/bumps (±0.1–0.3 eV) in the gaps
-  between bcc shells (3.3–4.5 Å), where the data put no neighbours, and the collapse moves atoms
-  into them (pair distances spread over 2.9–3.6 Å, CN(3.6 Å) 13.9 → 11.6). The data never
-  bring two atoms closer than 2.49 Å (most pairs ≥ 2.56 Å). Same ill-posedness as Phase 1's f_Z.
-  The default curvature penalty (`--reg 1e-4`) is negligible against the data terms.
+  The gain is all pair energy (angular terms oppose it, +45 meV/atom): the pair functions have
+  wells/bumps (±0.1–0.3 eV) in the gaps between bcc shells (3.3–4.5 Å), where the data put no
+  neighbours, and the collapse moves atoms into them (pair distances spread over 2.9–3.6 Å,
+  CN(3.6 Å) 13.9 → 11.6). The data never bring two atoms closer than 2.49 Å (most ≥ 2.56 Å).
+  **Smoothing does not fix it**: EAM with `--reg` 1e-2 … 10 or 10 knots still gains 247–820
+  meV/atom. The wells are where atoms go, not the cause.
+- Self-relaxation gain (meV/atom, `01` trained / `03` held out):
+
+  | | without K | with K (all ionic steps) |
+  |---|---|---|
+  | EAM | −288 (full objective) | −375 / −340 |
+  | ADP from scratch (aligned e0) | −526 (warm start + penalty) | **−12.5 / −28** (`curv_adp01`) |
+  | ADP warm start from EAM + penalty | −526 | −622 / −612 (inherits EAM's pair functions) |
+
+  Only ADP from scratch + K keeps the DFT structure (mean displacement 0.16 / 0.22 Å);
+  `curv_adp01`: F 0.10 eV/Å, C at DFT positions within 1.2/0.7/4.4 GPa, lowest eigenvalue −1.7.
+- **But its relaxed-ion C is wrong**: `elastic_eval.py --mode relax_ions` (relax in the DFT cell
+  first; `dft_cell` mode gives garbage once the model's minimum is off the DFT positions, since
+  each strain relaxes into a different nearby minimum): `01` C11/C12/C44 30/37/26.5, C′ −3
+  (DFT 197/113/30, C′ 42); `03` C′ −35 (DFT 49). Clamped C matches DFT, so the model's internal
+  relaxation removes ~45 GPa of C′ (DFT: clamped 47 → relaxed 42 for `01`; across all alloys DFT
+  relaxation lowers C′ by 12 % and C44 by 16 % on average, max 30 / 43 %). The residual soft
+  modes couple to tetragonal strain. The relaxed-ion C term (R) never switched on, because it
+  needs a positive-definite Hessian at the DFT reference.
 
 ## Roadmap
 
