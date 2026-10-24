@@ -139,9 +139,15 @@ def evaluate(model, ab, create_graph=False, cij=True):
     return res
 
 
+def step_rel2(dK, ab):
+    """Squared relative error |dF_model - dF_dft|^2 / |dF_dft|^2 per pair of ionic steps."""
+    return (dK ** 2).sum((1, 2)) / (ab.steps["dF"] ** 2).sum((1, 2))
+
+
 def loss_of(res, ab, w):
-    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa, and
-    0.01 eV/A for force differences between consecutive ionic steps (K, each work weighs 1).
+    """Weighted squared errors in natural scales: 1 meV/atom, 0.05 eV/A, 0.1 GPa, 5 GPa, and a
+    25 % relative error of the force differences between consecutive ionic steps (K; each work
+    weighs 1; per component they are only ~0.003 eV/A, so an absolute scale is met by dF = 0).
     Relax sets use the weights rE, rF, rS (default: same as E, F, S)."""
     p = "r" if ab.relax else ""
     wE, wF, wS = (w.get(p + k, w[k]) for k in ("E", "F", "S"))
@@ -153,7 +159,7 @@ def loss_of(res, ab, w):
         L = L + w["C"] * ((dC / 5.0) ** 2).mean()
     if "dK" in res and w.get("K", 0) > 0:
         sw = ab.steps["w"]
-        L = L + w["K"] * (sw * ((res["dK"] / 0.01) ** 2).mean((1, 2))).sum() / sw.sum()
+        L = L + w["K"] * (sw * step_rel2(res["dK"], ab)).sum() / (0.25 ** 2 * sw.sum())
     if "eig" in res and w.get("H", 0) > 0:
         L = L + w["H"] * stability_penalty(res["eig"], w.get("kmin", 0.5))
     if "dC_rel" in res and w.get("R", 0) > 0 and res["eig"].min() > 0:   # only once stable
@@ -182,7 +188,7 @@ def summarize(model, alloys):
             se_s += float((ab.w[:, None] * res["dS"] ** 2).sum()); n_s += 6 * float(ab.w.sum())
             if "dK" in res:
                 sw = ab.steps["w"]
-                se_k += float((sw * (res["dK"] ** 2).mean((1, 2))).sum()); n_k += float(sw.sum())
+                se_k += float((sw * step_rel2(res["dK"], ab)).sum()); n_k += float(sw.sum())
                 du, dF = ab.steps["du"], ab.steps["dF"]
                 n2 = (du ** 2).sum((1, 2))
                 k_dft = -(dF * du).sum((1, 2)) / n2
@@ -198,7 +204,7 @@ def summarize(model, alloys):
                S_GPa=np.sqrt(se_s / n_s))
     if n_k:                                     # force differences between ionic steps
         r = np.concatenate(ratio)
-        out.update(dF_steps_eV_A=np.sqrt(se_k / n_k), curv_ratio_median=float(np.median(r)),
+        out.update(dF_steps_rel=np.sqrt(se_k / n_k), curv_ratio_median=float(np.median(r)),
                    curv_neg_frac=float(np.mean(r < 0)))
     if cub:
         p, t = np.array([c[0] for c in cub]), np.array([c[1] for c in cub])

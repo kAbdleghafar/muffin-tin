@@ -123,4 +123,4 @@ def test_all_steps_build_and_curvature_term(built, tmp_path):
     s_full, s_ends = summarize(m, [ab]), summarize(m, [AlloyBatch(d, mu)])
     for k in ("E_meV_atom", "F_eV_A", "S_GPa", "C11_MAE"):
         assert s_full[k] == pytest.approx(s_ends[k], rel=1e-9)
-    assert {"dF_steps_eV_A", "curv_ratio_median", "curv_neg_frac"} <= set(s_full)
+    assert {"dF_steps_rel", "curv_ratio_median", "curv_neg_frac"} <= set(s_full)
